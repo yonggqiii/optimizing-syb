@@ -1,5 +1,6 @@
 {-# LANGUAGE PatternSynonyms #-}
 module Pass.Memo(memoizedSpecialize) where
+import Engines.Substitution(substitute)
 import GHC.Plugins
 import Control.Applicative
 import Control.Monad
@@ -63,10 +64,13 @@ memoSpecModGuts mod_guts = do
   putMsgS "== Phase: Memoizing Specialization =="
   let all_binds    :: [CoreBind]  = mg_binds mod_guts
       function_map :: FunctionMap = initFunctionMap all_binds
-  traversals <- extractTraversals all_binds function_map
-  let new_program = ter_program traversals
+  -- traversals <- extractTraversals all_binds function_map
+  TER { ter_program = traversal_extracted_program
+      , ter_traversal_specs = spec_map
+      , ter_traversal_ids = traversal_ids
+      }                                           <- extractTraversals all_binds function_map
+  new_program <- goElim traversal_extracted_program traversal_ids
   forM_ new_program (putMsg . ppr)
-  -- forM_ all_binds (putMsg . ppr)
   let new_mod_guts = mod_guts { mg_binds = new_program }
   return new_mod_guts
 
@@ -321,6 +325,26 @@ elemAnywhere _ [] = False
 elemAnywhere loc ((k, v) : xs) = 
   loc == k || loc `elem` v || loc `elemAnywhere` xs 
 
+lookupTopLevelRHS_maybe :: Id -> [CoreBind] -> Maybe CoreExpr
+lookupTopLevelRHS_maybe _ [] = Nothing
+lookupTopLevelRHS_maybe id' (NonRec lhs rhs : bs)
+  | id' == lhs = Just rhs
+  | otherwise = lookupTopLevelRHS_maybe id' bs
+lookupTopLevelRHS_maybe id' (Rec ls : bs) =
+    case aux ls of 
+      Nothing -> lookupTopLevelRHS_maybe id' bs
+      x -> x
+  where aux :: [(Id, CoreExpr)] -> Maybe CoreExpr
+        aux [] = Nothing
+        aux ((lhs, rhs) : rs)
+          | id' == lhs = Just rhs
+          | otherwise = aux rs
+
+lookupTopLevelRHS :: Id -> [CoreBind] -> CoreExpr
+lookupTopLevelRHS id' pgm = case lookupTopLevelRHS_maybe id' pgm of
+  Just x -> x
+  Nothing -> panic "the impossible happened... cannot find RHS of bind"
+
 lookupTopLevelBind :: BindLocation -> [CoreBind] -> Maybe CoreBind
 lookupTopLevelBind (TopLevelLocation i) ls = ls !? i
 lookupTopLevelBind (RecLocation i _) ls = ls !? i
@@ -560,8 +584,8 @@ extractTraversalsFromExpression (Everywhere combinator transformation arg_to_com
       -- check if specializable
       let new_spec = if isTypeFullyConcrete arg_to_combinator && null (getOccurringVariables dictionary_arg_to_combinator bound_vars) then spec1 else pushEntryToMapOfList traversal_lhs (arg_to_combinator, dictionary_arg_to_combinator) spec1
         
-      putMsg $ ppr new_bind_for_traversal
-      putMsg $ ppr replaced_expr
+      -- putMsg $ ppr new_bind_for_traversal
+      -- putMsg $ ppr replaced_expr
       return TEER { teer_result_expr        = replaced_expr
                   , teer_spec_map           = new_spec
                   , teer_subst_map          = template_entry : subst1
@@ -705,9 +729,9 @@ createTraversalFunctionType target_expr_type bound_vars =
 
 performSubstitution :: Expr Var -> (Expr Var, Var) -> CoreM (Maybe Var)
 performSubstitution candidate (matcher, traversal) = do
-  putMsgS "======= COMPARISONS ==============="
-  putMsg $ ppr candidate
-  putMsg $ ppr matcher
+  -- putMsgS "======= COMPARISONS ==============="
+  -- putMsg $ ppr candidate
+  -- putMsg $ ppr matcher
   if deBruijnize candidate == deBruijnize matcher then 
     return $ return traversal
   else 
@@ -838,7 +862,7 @@ mkTraversalRHSAndTemplate inner_expr bs t = do
         bux e [] = return e
         bux e (v : vs) = do
           v' <- mkDerivedUniqueName v
-          let e' = substituteExpression v v' e
+          let e' = substitute v v' e
           bux e' vs
 
 -- | Handy function for deriving a new unique var from an 
@@ -891,55 +915,55 @@ getOccurringVariables (Tick _ e) bvs = getOccurringVariables e bvs
 getOccurringVariables (Type _) _ = []
 getOccurringVariables (Coercion _) _ = []
 
-substituteExpression :: Var -> Var -> Expr Var -> Expr Var
-substituteExpression from to (Var i)
-  | from == i = Var to
-  | otherwise = Var i
-substituteExpression _ _ (Lit l) = Lit l
-substituteExpression from to (App f x) = App (substituteExpression from to f) (substituteExpression from to x)
-substituteExpression from to (Lam b e)
-    | from == b = Lam to e'
-    | otherwise = Lam b e'
-  where e' = substituteExpression from to e
-substituteExpression from to (Let binds e) = Let (aux binds) e'
-  where aux :: Bind Var -> Bind Var
-        aux (NonRec lhs rhs)
-          | lhs == from = NonRec to rhs'
-          | otherwise   = NonRec lhs rhs'
-          where rhs' = substituteExpression from to rhs
-        aux (Rec ls) = Rec $ map bux ls
-        bux :: (Var, Expr Var) -> (Var, Expr Var)
-        bux (lhs, rhs)
-          | lhs == from = (to, rhs')
-          | otherwise   = (lhs, rhs')
-          where rhs' = substituteExpression from to rhs
-        e' = substituteExpression from to e
-substituteExpression from to (Case e name t alts) 
-  | from == name = Case e' to t alts'
-  | otherwise    = Case e' name t alts'
-  where e' = substituteExpression from to e
-        alts' = map bux alts
-        bux :: Alt Var -> Alt Var
-        bux (Alt ac names e'') = Alt ac names' e'''
-          where names' = map cux names
-                e'''   = substituteExpression from to e''
-        cux :: Var -> Var
-        cux n | from == n = to
-              | otherwise = n
-substituteExpression from to (Cast e c) = Cast (substituteExpression from to e) c
-substituteExpression from to (Tick c e) = Tick c (substituteExpression from to e)
-substituteExpression from to (Type t) = Type $ substituteType from to t
-substituteExpression _ _ x = x
-
-substituteType :: Var -> Var -> Type -> Type
-substituteType from to t
-  | isTyVarTy t = let tv = do tv' <- getTyVar_maybe t
-                              guard $ tv' == from
-                              return $ mkTyVarTy to
-                  in  fromMaybe t tv
-  | otherwise   = let (tycon, ty_apps) = splitTyConApp t
-                      new_ty_apps = map (substituteType from to) ty_apps
-                  in  mkTyConApp tycon new_ty_apps
+-- substituteExpression :: Var -> Var -> Expr Var -> Expr Var
+-- substituteExpression from to (Var i)
+--   | from == i = Var to
+--   | otherwise = Var i
+-- substituteExpression _ _ (Lit l) = Lit l
+-- substituteExpression from to (App f x) = App (substituteExpression from to f) (substituteExpression from to x)
+-- substituteExpression from to (Lam b e)
+--     | from == b = Lam to e'
+--     | otherwise = Lam b e'
+--   where e' = substituteExpression from to e
+-- substituteExpression from to (Let binds e) = Let (aux binds) e'
+--   where aux :: Bind Var -> Bind Var
+--         aux (NonRec lhs rhs)
+--           | lhs == from = NonRec to rhs'
+--           | otherwise   = NonRec lhs rhs'
+--           where rhs' = substituteExpression from to rhs
+--         aux (Rec ls) = Rec $ map bux ls
+--         bux :: (Var, Expr Var) -> (Var, Expr Var)
+--         bux (lhs, rhs)
+--           | lhs == from = (to, rhs')
+--           | otherwise   = (lhs, rhs')
+--           where rhs' = substituteExpression from to rhs
+--         e' = substituteExpression from to e
+-- substituteExpression from to (Case e name t alts) 
+--   | from == name = Case e' to t alts'
+--   | otherwise    = Case e' name t alts'
+--   where e' = substituteExpression from to e
+--         alts' = map bux alts
+--         bux :: Alt Var -> Alt Var
+--         bux (Alt ac names e'') = Alt ac names' e'''
+--           where names' = map cux names
+--                 e'''   = substituteExpression from to e''
+--         cux :: Var -> Var
+--         cux n | from == n = to
+--               | otherwise = n
+-- substituteExpression from to (Cast e c) = Cast (substituteExpression from to e) c
+-- substituteExpression from to (Tick c e) = Tick c (substituteExpression from to e)
+-- substituteExpression from to (Type t) = Type $ substituteType from to t
+-- substituteExpression _ _ x = x
+--
+-- substituteType :: Var -> Var -> Type -> Type
+-- substituteType from to t
+--   | isTyVarTy t = let tv = do tv' <- getTyVar_maybe t
+--                               guard $ tv' == from
+--                               return $ mkTyVarTy to
+--                   in  fromMaybe t tv
+--   | otherwise   = let (tycon, ty_apps) = splitTyConApp t
+--                       new_ty_apps = map (substituteType from to) ty_apps
+--                   in  mkTyConApp tycon new_ty_apps
 
 updateBind :: BindLocation -> CoreExpr -> CoreProgram -> CoreProgram
 updateBind _ _ [] = panic "the impossible happened; cannot update bind!"
@@ -954,4 +978,71 @@ updateBind (RecLocation 0 j) rhs pgm = let (Rec ls) = head pgm
         aux j (x : xs) = x : aux (j - 1) xs
 updateBind (RecLocation i j) rhs (x : xs) = x : updateBind (RecLocation (i - 1) j) rhs xs
 
+{- Next step: Go elimination. 
+ -
+ - The idea is incredibly simple. Given a traversal:
+ -    traversal @a $b c d = everywhere (f ...)
+ -
+ - Inline everywhere
+ -    traversal @a $b c d = (\x -> let rec { go = x . (gmapT go) } in go) (f ...)
+ -
+ - replace RHS go in binding
+ -    traversal @a $b c d = (\x -> let rec { go = x . (gmapT (traversal @a $b c d)) } in go) (f ...)
+ -
+ - evaluate the lambda
+ -    traversal @a $b c d = let rec { go = x . (gmapT (traversal @a $b c d)) } in go
+ -
+ - inline go
+ -    traversal @a $b c d = x . (gmapT (traversal @a $b c d))
+ -
+ - Algorithm overview:
+ -    For each traversal_id f:
+ -        1.  Lookup RHS of f
+ -        2.  Traverse into main traversal function, keeping track of all the lambda bound variables
+ -        3.  Main traversal function is in the form of everywhere x @t $d
+ -        4.  Obtain unfolding of everywhere
+ -        5.  Replace everywhere with unfolding 
+ -        6.  Within unfolding, find the let rec bind LHS and RHS
+ -        7.  Replace letrec bind RHS occurrence of letrec bind LHS with invocation of f 
+ -        8.  Eval the fully evaluate the application of (\y ...) x @t $d
+ -        9.  Inline all occurrences of letrec bind LHS with its RHS
+ -  -}
 
+-- | Intelligently optimizes the structure of traversals in a way that makes them
+-- amenable for optimization.
+goElim :: CoreProgram -- ^ The program
+       -> [Id] -- ^ The IDs of the traversal functions
+       -> CoreM CoreProgram -- ^ The resulting program
+goElim pgm [] = return pgm
+goElim pgm' (x : xs) = do
+  -- putMsg $ ppr x
+  pgm <- goElim pgm' xs
+  let rhs = lookupTopLevelRHS x pgm
+  rhs' <- goElimTraversal x rhs
+  -- putMsg (ppr rhs)
+  return pgm
+
+goElimTraversal :: Id -> CoreExpr -> CoreM CoreExpr
+goElimTraversal lhs rhs = do
+  -- descend into the actual everywhere function
+  let traversal_structure = destructureTraversal rhs []
+  let scheme = ts_scheme traversal_structure
+  let uf = realIdUnfolding scheme
+  putMsg $ ppr $ unfoldingTemplate uf
+  return rhs
+
+data TraversalStructure = TS { ts_scheme :: Id
+                             , ts_type_arg :: Type
+                             , ts_dict_arg :: CoreExpr
+                             , ts_bvs :: BoundVars
+                             , ts_transform :: CoreExpr }
+
+destructureTraversal :: CoreExpr -> BoundVars -> TraversalStructure
+destructureTraversal (Everywhere scheme transformation type_arg dict_arg) bvs =
+  TS { ts_scheme = scheme
+     , ts_type_arg = type_arg
+     , ts_dict_arg = dict_arg
+     , ts_transform = transformation
+     , ts_bvs = bvs }
+destructureTraversal (Lam b e) bvs = destructureTraversal e (b : bvs)
+destructureTraversal _ _ = panic "the impossible happened! the traversal has a different structure than originally intended"

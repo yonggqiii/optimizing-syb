@@ -63,7 +63,14 @@ library
     exposed-modules:  OptimizingSYB
 
     -- Modules included in this library but not exported.
-    other-modules: Pass.PartialEval, Pass.Memo, Pass.SimpleInlinings
+    other-modules:  Pass.PartialEval
+                  , Pass.Memo
+                  , Pass.SimpleInlinings
+                  , Engines.LetInline
+                  , Engines.BetaReduction
+                  , Engines.InlineUnfolding
+                  , Utils
+                  , Engines.Substitution
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
