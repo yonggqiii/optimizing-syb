@@ -1,6 +1,8 @@
 {-# LANGUAGE PatternSynonyms #-}
 module Pass.Memo(memoizedSpecialize) where
 import Engines.Substitution(substitute)
+import Engines.LetInline(letInline)
+import Engines.BetaReduction(betaReduce)
 import GHC.Plugins
 import Control.Applicative
 import Control.Monad
@@ -69,6 +71,7 @@ memoSpecModGuts mod_guts = do
       , ter_traversal_specs = spec_map
       , ter_traversal_ids = traversal_ids
       }                                           <- extractTraversals all_binds function_map
+  mapM_ (putMsg . ppr) traversal_ids
   new_program <- goElim traversal_extracted_program traversal_ids
   forM_ new_program (putMsg . ppr)
   let new_mod_guts = mod_guts { mg_binds = new_program }
@@ -419,6 +422,12 @@ isVarDollar v = let name = varName v
 last' :: Int -> [a] -> [a]
 last' x ls | length ls <= x = ls
            | otherwise      = last' x (tail ls)
+
+dropLast :: Int -> [a] -> [a]
+dropLast n [] = []
+dropLast n ls@(x : xs)
+  | n >= length ls = []
+  | otherwise      = x : dropLast n xs
 
 isTypeFullyConcrete :: Type -> Bool
 isTypeFullyConcrete t
@@ -825,18 +834,18 @@ pushTraversalsIntoExpression (Case e var t alts) subst_map bound_vars = do
 abstractExpressionOverBoundVariables :: Expr Var -> [Var] -> Expr Var
 abstractExpressionOverBoundVariables = foldl (flip Lam)
 
-mkUniqTypeVar :: CoreM TyVar
-mkUniqTypeVar = do
+mkUniqTypeVar :: String -> CoreM TyVar
+mkUniqTypeVar name = do
   uniq <- getUniqueM
-  let name = mkInternalName uniq (mkVarOcc "a") (UnhelpfulSpan UnhelpfulGenerated)
-  return $ mkTyVar name liftedTypeKind
+  let name' = mkInternalName uniq (mkVarOcc name) (UnhelpfulSpan UnhelpfulGenerated)
+  return $ mkTyVar name' liftedTypeKind
 
 mkTraversalRHSAndTemplate :: Expr Var -> [Var] -> Type -> CoreM (Expr Var, Expr Var)
 mkTraversalRHSAndTemplate inner_expr bs t = do
     let (original_type_variable, rhs) = splitForAllTyVars t 
         (_many, data_arg, inner_type) = splitFunTy rhs
     -- create the type variable
-    ty_var_var <- mkUniqTypeVar
+    ty_var_var <- mkUniqTypeVar "a"
     let type_variable = mkTyVarTy ty_var_var
     -- create the dict variable
     let (data_tycon,_) = splitAppTy data_arg 
@@ -1019,17 +1028,89 @@ goElim pgm' (x : xs) = do
   pgm <- goElim pgm' xs
   let rhs = lookupTopLevelRHS x pgm
   rhs' <- goElimTraversal x rhs
+  let bindLoc = lookupBindNameForSure pgm x 
+  let pgm'' = updateBind bindLoc rhs' pgm
   -- putMsg (ppr rhs)
-  return pgm
+  return pgm''
 
 goElimTraversal :: Id -> CoreExpr -> CoreM CoreExpr
 goElimTraversal lhs rhs = do
+  putMsgS " +++++++ CURRENT TRAVERSAL +++++++"
+  putMsg $ ppr lhs
+  putMsg $ ppr rhs
   -- descend into the actual everywhere function
   let traversal_structure = destructureTraversal rhs []
   let scheme = ts_scheme traversal_structure
   let uf = realIdUnfolding scheme
-  putMsg $ ppr $ unfoldingTemplate uf
-  return rhs
+  let everywhere_unfolding = unfoldingTemplate uf
+  let inlined_unfolding = letInline everywhere_unfolding
+  putMsgS "=== RAW UNFOLDING ==="
+  putMsg $ ppr $ everywhere_unfolding
+  putMsgS "=== TYPE ==="
+  putMsg $ ppr $ exprType everywhere_unfolding
+  putMsgS "=== LET INLINED ==="
+  putMsg $ ppr $ inlined_unfolding
+  putMsgS "=== TYPE ==="
+  putMsg $ ppr $ exprType inlined_unfolding
+  putMsgS "=== GO REPLACEMENT ==="
+  go_replacement <- mkGoReplacement lhs traversal_structure
+  putMsg $ ppr $ go_replacement 
+  putMsgS "=== TYPE ==="
+  putMsg $ ppr $ exprType go_replacement
+  putMsgS "=== NEW UNFOLDING WITH REPLACED RHS GO ==="
+  let unfolding_with_replaced_go = pushGoReplacementIntoInlinedUnfolding inlined_unfolding go_replacement
+  putMsg $ ppr $ unfolding_with_replaced_go
+  putMsgS "=== TYPE ==="
+  putMsg $ ppr $ exprType unfolding_with_replaced_go
+  putMsgS "=== LET INLINING ==="
+  let let_inlined_unfolding_with_replaced_go = letInline unfolding_with_replaced_go
+  putMsg $ ppr let_inlined_unfolding_with_replaced_go
+  putMsgS "=== TYPE ==="
+  putMsg $ ppr $ exprType let_inlined_unfolding_with_replaced_go
+  -- putMsgS "=== BETA REDUCTION ==="
+  -- let beta_reduced_let_inlined_go = betaReduce let_inlined_unfolding_with_replaced_go
+  -- putMsg $ ppr beta_reduced_let_inlined_go
+  -- putMsgS "=== TYPE ==="
+  -- putMsg $ ppr $ exprType beta_reduced_let_inlined_go
+  -- push the created unfolding into everywhere
+  putMsgS "=== Pushed new unfolding into traversal RHS"
+  let rhs' = substitute scheme let_inlined_unfolding_with_replaced_go rhs
+  putMsg $ ppr rhs'
+  putMsgS "=== TYPE ==="
+  putMsg $ ppr $ exprType rhs'
+
+  putMsgS "=== Beta Reduced traversal RHS"
+  let rhs'' = betaReduce rhs'
+  putMsg $ ppr rhs''
+  putMsgS "=== TYPE ==="
+  putMsg $ ppr $ exprType rhs''
+  return rhs''
+
+mkGoReplacement :: Id -> TraversalStructure -> CoreM CoreExpr
+mkGoReplacement traversal_name traversal_structure = do
+  let bound_vars = ts_bvs traversal_structure
+      type_param = last bound_vars
+      dict_arg = ts_dict_arg traversal_structure
+      dict_param_type = exprType dict_arg
+  new_type_param <- mkUniqTypeVar "t1"
+  new_dict_param <- do
+      uniq <- getUniqueM
+      let name = mkInternalName uniq (mkVarOcc "$dData_internal_") (UnhelpfulSpan UnhelpfulGenerated)
+      let var = mkLocalVar VanillaId name Many dict_param_type vanillaIdInfo
+      return $ substitute type_param new_type_param var
+  let new_bound_vars = substitute type_param new_type_param $ dropLast 2 bound_vars
+  let lambda_body = createReplacedTraversal traversal_name (mkTyVarTy new_type_param) (Var new_dict_param) new_bound_vars
+  return $ Lam new_type_param (Lam new_dict_param lambda_body) 
+
+pushGoReplacementIntoInlinedUnfolding :: CoreExpr -> CoreExpr -> CoreExpr 
+pushGoReplacementIntoInlinedUnfolding (Let (Rec ((lhs, rhs) : [])) e) go_replacement = 
+  let new_rhs = substitute lhs go_replacement rhs
+  in  Let (NonRec lhs new_rhs) e
+pushGoReplacementIntoInlinedUnfolding (App f x) b = App (pushGoReplacementIntoInlinedUnfolding f b)
+                                                        (pushGoReplacementIntoInlinedUnfolding x b)
+pushGoReplacementIntoInlinedUnfolding (Lam b e) r = Lam b (pushGoReplacementIntoInlinedUnfolding e r)
+pushGoReplacementIntoInlinedUnfolding v _ = v
+
 
 data TraversalStructure = TS { ts_scheme :: Id
                              , ts_type_arg :: Type
