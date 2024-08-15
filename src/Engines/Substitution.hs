@@ -31,6 +31,14 @@ instance Substitutable Var Type where
       -- do ty_var -> ty_var -> ty_var substitution
     | isTyVarTy t = let t_var = getTypeVar t
                     in mkTyVarTy $ substitute from to t_var
+    | isFunTy t   = let (mult_, lhs, rhs) = splitFunTy t
+                        lhs' = substitute from to lhs
+                        rhs' = substitute from to rhs
+                    in  mkVisFunTy mult_ lhs' rhs'
+    | isForAllTy t = let (lhs, rhs) = splitForAllTyVars t
+                         lhs' = substitute from to lhs
+                         rhs' = substitute from to rhs
+                     in  mkSpecForAllTys lhs' rhs'
       -- perform substitution on all type arguments
     | otherwise   = let (tycon, ty_apps) = splitTyConApp t
                         new_ty_apps = substitute from to ty_apps
@@ -50,6 +58,14 @@ instance Substitutable Type Type where
                      in  if from == t_var then
                          to else
                          t
+    | isFunTy t   = let (mult_, lhs, rhs) = splitFunTy t
+                        lhs' = substitute from to lhs
+                        rhs' = substitute from to rhs
+                    in  mkVisFunTy mult_ lhs' rhs'
+    | isForAllTy t = let (lhs, rhs) = splitForAllTyVars t
+                         lhs' = substitute from to lhs
+                         rhs' = substitute from to rhs
+                     in  mkSpecForAllTys lhs' rhs'
   -- | Substitutes type variables to types in a type
     | otherwise   = let (tycon, ty_apps) = splitTyConApp t
                         new_ty_apps = substitute from to ty_apps
