@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -ddump-simpl -ddump-to-file #-}
 module Data.Company where
 
 import Data.Generics

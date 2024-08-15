@@ -3,6 +3,13 @@ module Engines.BetaReduction where
 import Engines.Substitution(substitute)
 import GHC.Plugins
 
+betaReduceCompletely :: (BetaReducible a, Eq b) => a -> (a -> b) -> a
+betaReduceCompletely e eq
+    | eq e == eq e' = e
+    | otherwise     = betaReduceCompletely e' eq
+  where e' = betaReduce e
+                                            
+
 class BetaReducible a where
   betaReduce :: a -> a
 
@@ -40,3 +47,5 @@ instance BetaReducible (Id, CoreExpr) where
 
 instance BetaReducible (Alt Var) where
   betaReduce (Alt alt_con t e) = Alt alt_con t (betaReduce e)
+
+

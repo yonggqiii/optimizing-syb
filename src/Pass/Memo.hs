@@ -2,12 +2,13 @@
 module Pass.Memo(memoizedSpecialize) where
 import Engines.Substitution(substitute)
 import Engines.LetInline(letInline)
-import Engines.BetaReduction(betaReduce)
+import Engines.BetaReduction
 import GHC.Plugins
 import Control.Applicative
 import Control.Monad
 import Data.Maybe 
 import GHC.Core.Map.Type
+import Engines.BetaReduction (betaReduceCompletely)
 
 {- This phase should come before all the other optimization phases 
  - in GHC. Therefore, this phase receives, what is effectively, raw 
@@ -1024,68 +1025,72 @@ goElim :: CoreProgram -- ^ The program
        -> CoreM CoreProgram -- ^ The resulting program
 goElim pgm [] = return pgm
 goElim pgm' (x : xs) = do
-  -- putMsg $ ppr x
   pgm <- goElim pgm' xs
   let rhs = lookupTopLevelRHS x pgm
   rhs' <- goElimTraversal x rhs
   let bindLoc = lookupBindNameForSure pgm x 
   let pgm'' = updateBind bindLoc rhs' pgm
-  -- putMsg (ppr rhs)
   return pgm''
 
 goElimTraversal :: Id -> CoreExpr -> CoreM CoreExpr
 goElimTraversal lhs rhs = do
-  putMsgS " +++++++ CURRENT TRAVERSAL +++++++"
-  putMsg $ ppr lhs
-  putMsg $ ppr rhs
   -- descend into the actual everywhere function
   let traversal_structure = destructureTraversal rhs []
   let scheme = ts_scheme traversal_structure
-  let uf = realIdUnfolding scheme
-  let everywhere_unfolding = unfoldingTemplate uf
+  let everywhere_unfolding = unfoldingTemplate $ realIdUnfolding scheme
   let inlined_unfolding = letInline everywhere_unfolding
-  putMsgS "=== RAW UNFOLDING ==="
-  putMsg $ ppr $ everywhere_unfolding
-  putMsgS "=== TYPE ==="
-  putMsg $ ppr $ exprType everywhere_unfolding
-  putMsgS "=== LET INLINED ==="
-  putMsg $ ppr $ inlined_unfolding
-  putMsgS "=== TYPE ==="
-  putMsg $ ppr $ exprType inlined_unfolding
-  putMsgS "=== GO REPLACEMENT ==="
   go_replacement <- mkGoReplacement lhs traversal_structure
-  putMsg $ ppr $ go_replacement 
-  putMsgS "=== TYPE ==="
-  putMsg $ ppr $ exprType go_replacement
-  putMsgS "=== NEW UNFOLDING WITH REPLACED RHS GO ==="
   let unfolding_with_replaced_go = pushGoReplacementIntoInlinedUnfolding inlined_unfolding go_replacement
-  putMsg $ ppr $ unfolding_with_replaced_go
-  putMsgS "=== TYPE ==="
-  putMsg $ ppr $ exprType unfolding_with_replaced_go
-  putMsgS "=== LET INLINING ==="
   let let_inlined_unfolding_with_replaced_go = letInline unfolding_with_replaced_go
-  putMsg $ ppr let_inlined_unfolding_with_replaced_go
-  putMsgS "=== TYPE ==="
-  putMsg $ ppr $ exprType let_inlined_unfolding_with_replaced_go
-  -- putMsgS "=== BETA REDUCTION ==="
-  -- let beta_reduced_let_inlined_go = betaReduce let_inlined_unfolding_with_replaced_go
-  -- putMsg $ ppr beta_reduced_let_inlined_go
-  -- putMsgS "=== TYPE ==="
-  -- putMsg $ ppr $ exprType beta_reduced_let_inlined_go
-  -- push the created unfolding into everywhere
-  putMsgS "=== Pushed new unfolding into traversal RHS"
-  let rhs' = substitute scheme let_inlined_unfolding_with_replaced_go rhs
-  putMsg $ ppr rhs'
-  putMsgS "=== TYPE ==="
-  putMsg $ ppr $ exprType rhs'
-
-  putMsgS "=== Beta Reduced traversal RHS"
-  let rhs'' = betaReduce rhs'
-  putMsg $ ppr rhs''
-  putMsgS "=== TYPE ==="
-  putMsg $ ppr $ exprType rhs''
+  let beta_reduced_let_inlined_go = betaReduceCompletely let_inlined_unfolding_with_replaced_go deBruijnize
+  let rhs' = substitute scheme beta_reduced_let_inlined_go rhs
+  let rhs'' = betaReduceCompletely rhs' deBruijnize
   return rhs''
 
+class TypeShow a where
+  showAllTypes :: a -> CoreM ()
+
+prt :: Outputable a => a -> CoreM()
+prt = putMsg . ppr
+
+instance TypeShow CoreExpr where
+  showAllTypes :: CoreExpr -> CoreM ()
+  showAllTypes (Type _) = return ()
+  showAllTypes (Var v)
+    | isTyVar v = return ()
+  showAllTypes e@(App f x) = do showAllTypes f
+                                showAllTypes x
+                                prt e
+                                prt $ exprType e
+  showAllTypes e@(Lam _ rhs) = do showAllTypes rhs
+                                  -- showAllTypes b
+                                  prt e
+                                  prt $ exprType e
+  showAllTypes e@(Let lhs rhs) = do showAllTypes lhs
+                                    showAllTypes rhs
+                                    prt e
+                                    prt $ exprType e
+  showAllTypes e@(Case e' b t alts) = do showAllTypes e'
+                                         -- showAllTypes b
+                                         mapM_ showAllTypes alts
+                                         prt e
+                                         prt $ exprType e
+  showAllTypes e@(Cast e' _) = do showAllTypes e'
+                                  prt e
+                                  prt $ exprType e
+  showAllTypes e@(Tick _ e') = do showAllTypes e'
+                                  prt e
+                                  prt $ exprType e
+  showAllTypes e = do putMsg $ ppr e
+                      putMsg $ ppr $ exprType e
+
+instance TypeShow CoreBind where
+  showAllTypes (NonRec _ rhs) = showAllTypes rhs
+  showAllTypes (Rec ls) = mapM_ showAllTypes ls
+instance TypeShow (Id, CoreExpr) where
+  showAllTypes (_, e) = showAllTypes e
+instance TypeShow (Alt Var) where
+  showAllTypes (Alt _ _ e) = showAllTypes e
 mkGoReplacement :: Id -> TraversalStructure -> CoreM CoreExpr
 mkGoReplacement traversal_name traversal_structure = do
   let bound_vars = ts_bvs traversal_structure
