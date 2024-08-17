@@ -2,9 +2,10 @@ module Engines.InlineUnfolding where
 import GHC.Plugins
 import Data.Maybe
 
+
 -- | Produces the unfolding of an 'Id'
-inlineId :: Id -> Maybe CoreExpr
-inlineId = maybeUnfoldingTemplate . realIdUnfolding
+inlineIdMaybe :: Id -> Maybe CoreExpr
+inlineIdMaybe = maybeUnfoldingTemplate . realIdUnfolding
 
 class InlineUnfolding a where
   inlineUnfolding :: Id -> a -> a
@@ -12,7 +13,7 @@ class InlineUnfolding a where
 instance InlineUnfolding CoreExpr where
   inlineUnfolding :: Id -> CoreExpr -> CoreExpr
   inlineUnfolding id' e@(Var var)
-    | id' == var = fromMaybe e (inlineId id')
+    | id' == var = fromMaybe e (inlineIdMaybe id')
     | otherwise  = e
   inlineUnfolding _ e@(Lit _) = e
   inlineUnfolding id' (App f x) = App (inlineUnfolding id' f) (inlineUnfolding id' x)

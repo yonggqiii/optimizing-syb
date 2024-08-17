@@ -1,5 +1,6 @@
 {-# LANGUAGE PatternSynonyms #-}
 module Pass.Memo(memoizedSpecialize) where
+import Engines.KnownCase(caseOfKnownCase)
 import Engines.Substitution(substitute)
 import Engines.LetInline(letInline)
 import Engines.BetaReduction
@@ -8,7 +9,9 @@ import Control.Applicative
 import Control.Monad
 import Data.Maybe 
 import GHC.Core.Map.Type
-import Engines.BetaReduction (betaReduceCompletely)
+import Engines.DropCasts (DropCasts(dropCasts))
+import GHC.IO (unsafePerformIO)
+
 
 {- This phase should come before all the other optimization phases 
  - in GHC. Therefore, this phase receives, what is effectively, raw 
@@ -68,14 +71,20 @@ memoSpecModGuts mod_guts = do
   let all_binds    :: [CoreBind]  = mg_binds mod_guts
       function_map :: FunctionMap = initFunctionMap all_binds
   -- traversals <- extractTraversals all_binds function_map
+  putMsgS $ show function_map
   TER { ter_program = traversal_extracted_program
       , ter_traversal_specs = spec_map
       , ter_traversal_ids = traversal_ids
       }                                           <- extractTraversals all_binds function_map
   mapM_ (putMsg . ppr) traversal_ids
   new_program <- goElim traversal_extracted_program traversal_ids
-  forM_ new_program (putMsg . ppr)
-  let new_mod_guts = mod_guts { mg_binds = new_program }
+  -- prt new_program
+  -- forM_ new_program (putMsg . ppr)
+  let swls = map initSpecializationWorkList spec_map
+  (swls', new_program') <- specTraversals swls new_program
+  final_pgm <- replaceProgramWithSpecializations new_program' swls'
+  let new_mod_guts = mod_guts { mg_binds = final_pgm }
+  prt final_pgm
   return new_mod_guts
 
 {- First thing to do: get all functions that have traversals.
@@ -264,7 +273,7 @@ filterSpecializationGroupsWithNoSpecializableTraversal ((loc, ls_locs) : xs) pgm
   where aux :: BindLocation -> Bool
         aux bind_location = let res = do (_, e) <- lookupAnyBindPair bind_location pgm
                                          guard $ containsTargetExpr e
-                            in isJust res
+                            in  isJust res
         rec_res :: FunctionMap
         rec_res = filterSpecializationGroupsWithNoSpecializableTraversal xs pgm
 
@@ -272,9 +281,9 @@ filterSpecializationGroupsWithNoSpecializableTraversal ((loc, ls_locs) : xs) pgm
 -- i.e. 'everywhere f' for some 'f'
 containsTargetExpr :: Expr Var -> Bool
 -- case of everywhere f @Type $dict
-containsTargetExpr (Everywhere combinator transformation arg_to_combinator _)
+containsTargetExpr (Everywhere combinator transformation arg_to_combinator dict_arg)
   | isVarEverywhere combinator && isTypeFullyConcrete arg_to_combinator = True
-  | otherwise                                                           = containsTargetExpr transformation
+  | otherwise                                                           = containsTargetExpr transformation || containsTargetExpr dict_arg
 containsTargetExpr (App f arg)           = containsTargetExpr f || containsTargetExpr arg
 containsTargetExpr (Var _)               = False
 containsTargetExpr (Lit _)               = False
@@ -592,7 +601,17 @@ extractTraversalsFromExpression (Everywhere combinator transformation arg_to_com
       let replaced_expr = createReplacedTraversal traversal_lhs arg_to_combinator dictionary_arg_to_combinator bound_vars_of_expression
       let template_entry = (template_left, traversal_lhs)
       -- check if specializable
-      let new_spec = if isTypeFullyConcrete arg_to_combinator && null (getOccurringVariables dictionary_arg_to_combinator bound_vars) then spec1 else pushEntryToMapOfList traversal_lhs (arg_to_combinator, dictionary_arg_to_combinator) spec1
+      new_spec <- 
+        if isTypeFullyConcrete arg_to_combinator && null (getOccurringVariables dictionary_arg_to_combinator bound_vars) then do
+          putMsgS " ==== PUSH ==== "
+          prt arg_to_combinator
+          prt dictionary_arg_to_combinator
+          return $ pushEntryToMapOfList traversal_lhs (arg_to_combinator, dictionary_arg_to_combinator) spec1
+        else do
+          putMsgS " ==== NO PUSH ==== "
+          prt arg_to_combinator
+          prt dictionary_arg_to_combinator
+          return spec1 
         
       -- putMsg $ ppr new_bind_for_traversal
       -- putMsg $ ppr replaced_expr
@@ -772,7 +791,7 @@ pushTraversalsIntoExpression (App (App (App (Var combinator) transformation) (Ty
         Just traversal ->
           -- create the new expression
           let replacement = createReplacedTraversal traversal arg_to_combinator dictionary_arg_to_combinator bound_vars_of_expression
-              new_spec = if isTypeFullyConcrete arg_to_combinator && null (getOccurringVariables dictionary_arg_to_combinator bound_vars) then spec1 else pushEntryToMapOfList traversal (arg_to_combinator, dictionary_arg_to_combinator) spec1
+              new_spec = if isTypeFullyConcrete arg_to_combinator && null (getOccurringVariables dictionary_arg_to_combinator bound_vars) then pushEntryToMapOfList traversal (arg_to_combinator, dictionary_arg_to_combinator) spec1 else spec1
           in return (replacement, new_spec)
               
         Nothing -> let actual_expr = App (App (App (Var combinator) real_transformation) (Type arg_to_combinator)) dictionary_arg_to_combinator
@@ -1045,6 +1064,7 @@ goElimTraversal lhs rhs = do
   let beta_reduced_let_inlined_go = betaReduceCompletely let_inlined_unfolding_with_replaced_go deBruijnize
   let rhs' = substitute scheme beta_reduced_let_inlined_go rhs
   let rhs'' = betaReduceCompletely rhs' deBruijnize
+  -- showAllTypes rhs''
   return rhs''
 
 class TypeShow a where
@@ -1058,6 +1078,8 @@ instance TypeShow CoreExpr where
   showAllTypes (Type _) = return ()
   showAllTypes (Var v)
     | isTyVar v = return ()
+    | otherwise = do putMsgS $ nameStableString $ varName v
+                     prt $ exprType $ Var v
   showAllTypes e@(App f x) = do showAllTypes f
                                 showAllTypes x
                                 prt e
@@ -1132,3 +1154,299 @@ destructureTraversal (Everywhere scheme transformation type_arg dict_arg) bvs =
      , ts_bvs = bvs }
 destructureTraversal (Lam b e) bvs = destructureTraversal e (b : bvs)
 destructureTraversal _ _ = panic "the impossible happened! the traversal has a different structure than originally intended"
+
+replaceProgramWithSpecializations :: CoreProgram -> [SpecializationWorklist] -> CoreM CoreProgram
+replaceProgramWithSpecializations pgm swls = do
+  let ls = map (\x -> (swl_traversal_id x, swl_completed x)) swls
+  replaceProgramWithSpecs pgm ls
+
+
+replaceProgramWithSpecs :: CoreProgram -> [(Id, [(Type, Id)])] -> CoreM CoreProgram
+replaceProgramWithSpecs pgm [] = return pgm
+replaceProgramWithSpecs pgm' ((lhs, specs) : ls) = do
+  pgm <- replaceProgramWithSpecs pgm' ls
+  pgm2 <- replaceProgramWithSpec lhs specs pgm
+  return pgm2
+
+replaceProgramWithSpec :: Id -> [(Type, Id)] -> CoreProgram -> CoreM CoreProgram
+replaceProgramWithSpec _ _ [] = return []
+replaceProgramWithSpec lhs specs (x : xs) = do
+  xs' <- replaceProgramWithSpec lhs specs xs
+  x' <- replaceBindWithSpec lhs specs x
+  return $ x' : xs'
+
+replaceBindWithSpec :: Id -> [(Type, Id)] -> CoreBind -> CoreM CoreBind
+replaceBindWithSpec lhs specs (NonRec b e) = do
+  e' <- replaceExprWithSpec lhs specs e
+  return $ NonRec b e'
+replaceBindWithSpec lhs specs (Rec ls) = do
+  ls' <- mapM (replacePairsWithSpec lhs specs) ls
+  return $ Rec ls'
+
+replacePairsWithSpec :: Id -> [(Type, Id)] -> (Id, CoreExpr) -> CoreM (Id, CoreExpr)
+replacePairsWithSpec lhs specs (i, e) = do
+  e' <- replaceExprWithSpec lhs specs e 
+  return (i, e')
+
+replaceExprWithSpec :: Id -> [(Type, Id)] -> CoreExpr -> CoreM CoreExpr
+replaceExprWithSpec lhs specs (App (App (Var i) (Type t)) _)
+  | i == lhs && any (\(x, _) -> deBruijnize x == deBruijnize t) specs = do
+      -- get the actual spec
+      let Just new_id = lookup (deBruijnize t) (map (\(x, y) -> (deBruijnize x, y)) specs)
+      return $ Var new_id 
+replaceExprWithSpec lhs specs (App f x) = do
+  f' <- replaceExprWithSpec lhs specs f
+  x' <- replaceExprWithSpec lhs specs x
+  return $ App f' x'
+replaceExprWithSpec lhs specs (Lam b e) = do
+  e' <- replaceExprWithSpec lhs specs e
+  return $ Lam b e'
+replaceExprWithSpec lhs specs (Let b e) = do
+  b' <- replaceBindWithSpec lhs specs b
+  e' <- replaceExprWithSpec lhs specs e
+  return $ Let b' e'
+
+replaceExprWithSpec lhs specs (Case e b t alts) = do
+  e' <- replaceExprWithSpec lhs specs e
+  alts' <- mapM (replaceAltsWithSpec lhs specs) alts
+  return $ Case e' b t alts'
+replaceExprWithSpec lhs specs (Cast e c) = do
+  e' <- replaceExprWithSpec lhs specs e
+  return $ Cast e' c
+replaceExprWithSpec lhs specs (Tick c e) = do
+  e' <- replaceExprWithSpec lhs specs e
+  return $ Tick c e'
+replaceExprWithSpec _ _ e = return e
+
+replaceAltsWithSpec :: Id -> [(Type, Id)] -> Alt Var -> CoreM (Alt Var)
+replaceAltsWithSpec lhs specs (Alt ac ls e) = do 
+  e' <- replaceExprWithSpec lhs specs e
+  return $ Alt ac ls e'
+  
+
+
+data SpecializationWorklist = SWL { swl_traversal_id :: Id
+                                  , swl_worklist :: [(Type, CoreExpr)]
+                                  , swl_completed :: [(Type, Id)] }
+
+-- | creating the SWL
+initSpecializationWorkList :: (Id, [(Type, CoreExpr)]) -> SpecializationWorklist
+initSpecializationWorkList (id', ls) = SWL { swl_traversal_id = id'
+                                          , swl_worklist = ls
+                                          , swl_completed = []}
+
+specTraversals :: [SpecializationWorklist] -> CoreProgram -> CoreM ([SpecializationWorklist], CoreProgram)
+specTraversals [] pgm = return ([], pgm)
+specTraversals (swl : swls) pgm = do
+  (swl', pgm') <- specTraversal swl pgm
+  (swls', pgm'') <- specTraversals swls pgm'
+  return (swl' : swls', pgm'')
+
+specTraversal :: SpecializationWorklist -> CoreProgram -> CoreM (SpecializationWorklist, CoreProgram)
+specTraversal sw@(SWL { swl_worklist = [] }) pgm = return (sw, pgm)
+specTraversal sw@(SWL { swl_completed = ls }) pgm
+  | length ls > 30 = return (sw, pgm)
+specTraversal sw pgm = do
+  let SWL { swl_traversal_id = t_id 
+          , swl_worklist     = worklist'
+          , swl_completed    = completed } = sw
+      ((type_arg, dict_arg) : worklist) = worklist' -- earlier case handled the empty worklist
+  if isSpecCompleted type_arg completed then
+    -- already specialized, ignore and move to next workitem
+    specTraversal (sw { swl_worklist = worklist }) pgm else
+    -- perform the traversal
+    do (specialized_id, specialized_id_rhs, new_work) <- specOneTraversal t_id type_arg dict_arg pgm
+       let new_completed = (type_arg, specialized_id) : completed
+       let added_worklist = new_work ++ worklist
+       let new_pgm = NonRec specialized_id specialized_id_rhs : pgm
+       specTraversal sw { swl_worklist = added_worklist, swl_completed = new_completed } new_pgm 
+
+  -- return (sw, pgm)
+
+specOneTraversal :: Id -> Type -> CoreExpr -> CoreProgram -> CoreM (Id, CoreExpr, [(Type, CoreExpr)])
+specOneTraversal t_id type_arg dict_arg pgm = do
+  -- obtain the RHS of the traversal ID to specialize
+  let traversal_rhs = lookupTopLevelRHS t_id pgm
+  let specialized_rhs = betaReduceCompletely (App (App traversal_rhs (Type type_arg)) dict_arg) deBruijnize
+  specialized_id <- mkDerivedUniqueName t_id
+  (final_rhs, new_specs) <- optimizeSpecialization t_id specialized_rhs 
+  let final_spec_id = setIdType specialized_id (exprType final_rhs)
+  return (final_spec_id, final_rhs, new_specs)
+
+isSpecCompleted :: Type -> [(Type, Id)] -> Bool
+isSpecCompleted t ls = let types = map fst ls
+                           db_types = map deBruijnize types
+                       in deBruijnize t `elem` db_types
+
+optimizeSpecialization :: Id -> CoreExpr -> CoreM (CoreExpr, [(Type, CoreExpr)])
+optimizeSpecialization gen_traversal_id spec_rhs = do
+  rhs' <- genericElimination spec_rhs
+  let rhs = betaReduceCompletely rhs' deBruijnize
+  -- prt rhs
+  let specs = getSpecializations gen_traversal_id [] rhs
+  -- prt specs
+  return (rhs, specs)
+
+-- TODO: make this proper
+genericElimination :: CoreExpr -> CoreM CoreExpr
+genericElimination (App (App (Var v) (Type t)) d)
+  | nameStableString (varName v) == "$base$Data.Data$gmapT" = do
+      --putMsgS%%%"FOUND"
+      --prt%%%v
+      let uf = unfoldingTemplate $ realIdUnfolding v
+      d' <- fullyElaborateDFunUnfoldingsLikeCrazy d
+      --putMsgS%%%"DICTIONARY"
+      --prt%%%d'
+      --putMsgS%%%"BETA REDUCING"
+      let x = betaReduceCompletely (App (App uf (Type t)) d') deBruijnize
+      --prt%%%x
+      --putMsgS%%%"CASE OF KNOWN CASE"
+      let x' = caseOfKnownCase x
+      --prt%%%x'
+      --putMsgS%%%"DROP CASTS"
+      let y = dropCasts x'
+      --prt%%%y
+      let type_specific_gmapT = y
+      --prt%%%type_specific_gmapT
+      --putMsgS%%%"UNFOLDING ACTUAL GMAPT"
+      tttt <- fullyElaborateDFunUnfoldingsLikeCrazy type_specific_gmapT
+      --prt%%%tttt
+      -- let (Var v') = type_specific_gmapT
+      -- --prt%%%$ exprType (Var v')
+      -- --prt%%%$ unfoldingTemplate $ realIdUnfolding v
+      --putMsgS%%%"DROP CASTS"
+      let tttttt = dropCasts tttt
+      --prt%%%tttttt
+      --putMsgS%%%"UNFOLDING GUNFOLD IN CASE"
+      tttttttt' <- fullyElaborateLHS tttttt
+      --prt%%%tttttttt'
+      --putMsgS%%%"Let-Inlining"
+      let tttttttt'' = letInline tttttttt'
+      --prt%%%tttttttt''
+      --putMsgS%%%"Beta Reduction"
+      let xxx123 = betaReduceCompletely tttttttt'' deBruijnize
+      --prt%%%xxx123
+      --putMsgS%%%"DROP CASTS"
+      let actual_gmapT = dropCasts $ xxx123
+      --prt%%%actual_gmapT
+
+      return actual_gmapT
+    
+-- genericElimination (Var v)
+--   | nameStableString (varName v) == "$base$Data.Data$gmapT" = do
+--       --putMsgS%%%"FOUND"
+--       --prt%%%v
+--       let uf = unfoldingTemplate $ realIdUnfolding v
+--       return uf
+--   | otherwise = return (Var v)
+genericElimination (Lam b e) = 
+  do e' <- genericElimination e
+     return $ Lam b e'
+genericElimination (App f x) =
+  do f' <- genericElimination f
+     x' <- genericElimination x
+     return (App f' x')
+genericElimination (Let b e) = do
+  e' <- genericElimination e
+  return $ Let b e'
+genericElimination (Case e b t alts) = do
+  e' <- genericElimination e
+  return $ Case e' b t alts
+genericElimination (Cast e c) = do 
+  e' <- genericElimination e
+  return $ Cast e' c
+genericElimination (Tick c e) = do
+  e' <- genericElimination e
+  return $ Tick c e'
+genericElimination x = return x
+
+fullyElaborateDFunUnfoldingsLikeCrazy :: CoreExpr -> CoreM CoreExpr
+fullyElaborateDFunUnfoldingsLikeCrazy x = do
+  x' <- fullyElaborateDFunUnfoldings x
+  if deBruijnize x == deBruijnize x' then
+      return x
+  else 
+      fullyElaborateDFunUnfoldingsLikeCrazy x'
+
+-- TODO: handle more complex DFuns
+fullyElaborateDFunUnfoldings :: CoreExpr -> CoreM CoreExpr
+fullyElaborateDFunUnfoldings (Var v) = do
+  let uf = realIdUnfolding v
+  case uf of 
+    DFunUnfolding bndrs df_con df_args -> do
+      -- --prt%%%bndrs
+      -- --prt%%%df_con
+      -- --prt%%%$ dataConRepType df_con
+      -- --prt%%%df_args
+      let dfune = mkCoreConApps df_con df_args
+      let dfun = foldr Lam dfune bndrs
+      --putMsgS%%%"=== GENERATED DFUN ==="
+      --prt%%% dfun
+      return  dfun
+    CoreUnfolding tmpl _ _ _ _ -> do
+      return tmpl
+    OtherCon s -> do
+      --putMsgS%%%"=== OTHERCON ==="
+      --prt%%%v
+      return $ Var v
+    NoUnfolding -> do
+      --putMsgS%%%"=== NO UNFOLDING ==="
+      --prt%%%v
+      return $ Var v
+
+    _ -> do
+      --putMsgS%%%"=== NO UNFOLDING!? ==="
+      --prt%%%v
+      return $ Var v
+  -- --prt%%%uf
+  -- --putMsgS%%%" ==== above is unfolding term. lets see the template ===="
+  -- --prt%%%$ unfoldingTemplate uf
+  -- return $ Var v
+fullyElaborateDFunUnfoldings (App f x) = do
+  f' <- fullyElaborateDFunUnfoldings f
+  let res = betaReduceCompletely (App f' x) deBruijnize
+  return $ res
+fullyElaborateDFunUnfoldings x = return x
+
+fullyElaborateLHS :: CoreExpr -> CoreM CoreExpr
+fullyElaborateLHS (Var v) = fullyElaborateDFunUnfoldings (Var v)
+fullyElaborateLHS (Lam b e) = do e' <- fullyElaborateLHS e
+                                 return $ Lam b e'
+fullyElaborateLHS (App f x) = do f' <- fullyElaborateLHS f
+                                 return $ betaReduceCompletely (App f' x) deBruijnize
+fullyElaborateLHS x = return x
+
+class GetSpecializations a where
+  getSpecializations :: Id -> [Var] -> a -> [(Type, CoreExpr)]
+
+instance GetSpecializations CoreExpr where 
+  getSpecializations :: Id -> [Var] -> CoreExpr -> [(Type, CoreExpr)]
+  getSpecializations gen_traversal_id bvs (App (App (Var v) (Type t)) d) 
+    | v == gen_traversal_id && null (getOccurringVariables d bvs) = 
+        (t, d) : (getSpecializations gen_traversal_id bvs d)
+  getSpecializations gen_traversal_id bvs (App f x) = (getSpecializations gen_traversal_id bvs f) ++
+                                                          (getSpecializations gen_traversal_id bvs x)
+  getSpecializations gen_traversal_id bvs (Lam b e) = getSpecializations gen_traversal_id (b : bvs) e
+  getSpecializations gen_traversal_id bvs (Let b e) = let bdrs = bindersOf b
+                                                          new_bvs = bdrs ++ bvs
+                                                      in (getSpecializations gen_traversal_id new_bvs b) ++
+                                                          (getSpecializations gen_traversal_id new_bvs e) 
+  getSpecializations gen_traversal_id bvs (Case e b t alts) = getSpecializations gen_traversal_id bvs e ++
+                                                                getSpecializations gen_traversal_id (b : bvs) alts
+  getSpecializations gen_traversal_id bvs (Cast e c) = getSpecializations gen_traversal_id bvs e
+  getSpecializations gen_traversal_id bvs (Tick c e) = getSpecializations gen_traversal_id bvs e
+  getSpecializations _ _ _ = []
+
+instance GetSpecializations (Alt Var) where
+  getSpecializations gen_traversal_id bvs (Alt alt_con bs e) = getSpecializations gen_traversal_id (bs ++ bvs) e
+
+
+instance GetSpecializations a => GetSpecializations [a] where
+  getSpecializations g b ls = ls >>= getSpecializations g b
+
+instance GetSpecializations CoreBind where
+  getSpecializations gen_traversal_id bvs (NonRec b e) = getSpecializations gen_traversal_id (b : bvs) e
+  getSpecializations gen_traversal_id bvs (Rec ls) = getSpecializations gen_traversal_id (bindersOf (Rec ls) ++ bvs) ls
+
+instance GetSpecializations(Id, CoreExpr) where
+  getSpecializations gen_traversal_id bvs (var, e) = getSpecializations gen_traversal_id (var : bvs) e

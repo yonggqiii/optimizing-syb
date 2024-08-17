@@ -1,6 +1,7 @@
 module Pass.SimpleInlinings(simpleInlinings) where
 
 import GHC.Plugins
+import Engines.LetInline (LetInlinable(letInline))
 
 {- This phase genuinely exists only to expose the interesting structure that 
  - we want to specialize. 
@@ -27,7 +28,7 @@ simpleInlineModGuts mod_guts = do
 
 inlineCoreBind :: CoreBind -> CoreM CoreBind
 inlineCoreBind (NonRec b e) = do
-  e' <- inlineCoreExpr e
+  e' <- inlineCoreExpr $ letInline e
   return $ NonRec b e'
 inlineCoreBind (Rec ls) = do
     ls' <- aux ls
@@ -36,7 +37,7 @@ inlineCoreBind (Rec ls) = do
         aux [] = return []
         aux ((b, e) : xs) = do
           xs' <- aux xs
-          e'  <- inlineCoreExpr e
+          e'  <- inlineCoreExpr $ letInline e
           return $ (b, e') : xs'
 
 inlineCoreExpr :: Expr Var -> CoreM (Expr Var)

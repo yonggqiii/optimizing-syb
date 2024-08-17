@@ -5,6 +5,33 @@ module Main where
 import Data.Company
 import Data.Generics
 
+-- data Company = C [Dept] 
+--   deriving (Typeable, Show, Data)
+--
+-- data Dept = D Name Manager [SubUnit] 
+--   deriving (Typeable, Show, Data)
+--
+-- data SubUnit = PU Employee 
+--              | DU Dept 
+--   deriving (Typeable, Show, Data)
+--
+-- data Employee = E Person Salary 
+--   deriving (Typeable, Show, Data)
+--
+-- data Person = P Name Address 
+--   deriving (Typeable, Show, Data)
+--
+-- data Salary = S Float 
+--   deriving (Typeable, Show, Data)
+--
+-- type Manager = Employee
+-- type Name = String
+-- type Address = String
+--
+-- data List a = EmptyList | Cons a (List a)
+--   deriving (Typeable, Show, Data)
+
+
 incS :: Float -> Salary -> Salary
 incS k (S s) = S (s * (1 + k))
 
@@ -20,8 +47,11 @@ increase k = everywhere $ mkT (incS k)
 --   let f :: forall a. Data a => a -> a 
 --       f = mkT $ incS k
 --   in everywhere f 
-{-# SPECIALIZE increase :: Float -> [Dept] -> [Dept] #-}
+-- {-# SPECIALIZE increase :: Float -> List Dept -> List Dept #-}
 {-# SPECIALIZE increase :: Float -> Company -> Company #-}
+-- {-# SPECIALIZE increase :: Float -> TreeLike Company Int -> TreeLike Company Int #-}
+-- {-# SPECIALIZE increase :: Float -> [Dept] -> [Dept] #-}
+-- {-# SPECIALIZE increase :: Float -> Employee -> Employee #-}
 -- {-# SPECIALIZE increase :: Data a => Float -> [a] -> [a] #-}
  
 -- add' :: Num a => a -> a -> a
@@ -46,6 +76,7 @@ main = do
   let d1 = D "Alice's place" e1 []
   let d2 = D "Bob's place" e2 [PU e3]
   let c = C [d1, d2]
+  -- let c = Cons d1 (Cons d2 EmptyList)
   print c
   let d = increase 0.1 c
   print d

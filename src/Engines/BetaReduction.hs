@@ -2,6 +2,7 @@ module Engines.BetaReduction where
 
 import Engines.Substitution(substitute)
 import GHC.Plugins
+import GHC.IO (unsafePerformIO)
 
 betaReduceCompletely :: (BetaReducible a, Eq b) => a -> (a -> b) -> a
 betaReduceCompletely e eq
@@ -27,6 +28,27 @@ instance BetaReducible CoreExpr where
     in  case f' of 
           (Lam var rhs) -> substitute var x' rhs
           e -> App e x'
+  -- betaReduce (App f x) = 
+  --   let f' = betaReduce f
+  --       x' = betaReduce x
+  --   in  case f' of 
+  --         (Lam var rhs) -> case x' of 
+  --           -- (Type t) -> let iss = emptyInScopeSet
+  --           --                 tvEnv = unitVarEnv var t
+  --           --                 idEnv = emptyVarEnv
+  --           --                 cvEnv = emptyVarEnv
+  --           --                 s = Subst iss idEnv tvEnv cvEnv
+  --           --             in seq (unsafePerformIO (putStrLn (showSDocUnsafe (ppr f')))) $ 
+  --           --                 seq (unsafePerformIO (putStrLn (showSDocUnsafe (ppr x')))) $ 
+  --           --                   substExpr s rhs-- do the substitution
+  --           e -> let iss = emptyInScopeSet
+  --                    tvEnv = emptyVarEnv 
+  --                    idEnv = unitVarEnv var e
+  --                    cvEnv = emptyVarEnv
+  --                    s = Subst iss idEnv tvEnv cvEnv
+  --                in substExpr s rhs-- do the substitution
+  --
+  --         e -> App e x'
   betaReduce (Lam b e) = Lam b (betaReduce e)
   betaReduce (Let b e) = Let (betaReduce b) (betaReduce e)
   betaReduce (Case e v t alts) = Case (betaReduce e)

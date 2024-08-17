@@ -55,6 +55,8 @@ extra-doc-files:    CHANGELOG.md
 common warnings
     ghc-options: -Wall
 
+          
+
 library
     -- Import common warning flags.
     import:           warnings
@@ -69,8 +71,10 @@ library
                   , Engines.LetInline
                   , Engines.BetaReduction
                   , Engines.InlineUnfolding
-                  , Utils
+                  , Engines.KnownCase
                   , Engines.Substitution
+                  , Engines.DropCasts
+                  , Utils
 
     -- LANGUAGE extensions used by modules in this package.
     -- other-extensions:
@@ -98,7 +102,10 @@ executable optimizing-syb
     -- other-extensions:
 
     -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.17.2.1, optimizing-syb, syb
+    build-depends:    base ^>=4.17.2.1
+                    , optimizing-syb
+                    -- , /home/yongqi/Repositories/syb/dist-newstyle/build/x86_64-linux/ghc-9.4.8/syb-0.7.2.4
+                    , syb
 
     -- Directories containing source files.
     hs-source-dirs:   app

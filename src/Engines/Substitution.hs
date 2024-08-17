@@ -1,6 +1,42 @@
 module Engines.Substitution where
 import GHC.Plugins
-
+    ( Id,
+      CoreExpr,
+      Alt(..),
+      Var,
+      CoreBind,
+      Bind(Rec, NonRec),
+      Expr(Coercion, Var, Lit, App, Lam, Let, Case, Cast, Tick, Type),
+      Type,
+      Coercion,
+      TyVar,
+      mkTyConApp,
+      mkTyVarTy,
+      mkVisFunTy,
+      emptyCvSubstEnv,
+      getTyVar,
+      isCoercionTy,
+      isForAllTy,
+      isFunTy,
+      isTyVarTy,
+      mkSpecForAllTys,
+      splitForAllTyVars,
+      splitFunTy,
+      splitTyConApp,
+      splitTyConApp_maybe,
+      isTyVar,
+      updateVarType,
+      emptyInScopeSet,
+      unitVarEnv,
+      panic,
+      ppr,
+      showSDocUnsafe,
+      TCvSubst(TCvSubst),
+      isCoVarType, 
+      )
+import GHC.Core.Coercion (substCo)
+import GHC.Core.Type (substTy)
+import GHC.IO (unsafePerformIO)
 class Substitutable b c where
   substitute :: Var -> b -> c -> c
 
@@ -39,10 +75,16 @@ instance Substitutable Var Type where
                          lhs' = substitute from to lhs
                          rhs' = substitute from to rhs
                      in  mkSpecForAllTys lhs' rhs'
+    | isCoercionTy t = panic "Type -> Type substitution has a coercion!?"
+    | isCoVarType t = panic "CoVar"
       -- perform substitution on all type arguments
-    | otherwise   = let (tycon, ty_apps) = splitTyConApp t
-                        new_ty_apps = substitute from to ty_apps
-                    in  mkTyConApp tycon new_ty_apps
+    | Just (tycon, ty_apps) <- splitTyConApp_maybe t
+      = let new_ty_apps = substitute from to ty_apps
+        in  mkTyConApp tycon new_ty_apps
+    | otherwise   = panic "wtf?" 
+    -- let (tycon, ty_apps) = splitTyConApp t
+    --                     new_ty_apps = substitute from to ty_apps
+    --                 in  seq (unsafePerformIO (putStrLn (showSDocUnsafe (ppr t)))) $ mkTyConApp tycon new_ty_apps
 
 getTypeVar :: Type -> TyVar
 getTypeVar = getTyVar "impossible! a definite type variable cant produce its type variable"
@@ -66,10 +108,14 @@ instance Substitutable Type Type where
                          lhs' = substitute from to lhs
                          rhs' = substitute from to rhs
                      in  mkSpecForAllTys lhs' rhs'
+    | isCoercionTy t = panic "Type -> Type substitution has a coercion!?"
+    | isCoVarType t = panic "CoVar"
+      -- perform substitution on all type arguments
+    | Just (tycon, ty_apps) <- splitTyConApp_maybe t
+      = let new_ty_apps = substitute from to ty_apps
+        in  mkTyConApp tycon new_ty_apps
   -- | Substitutes type variables to types in a type
-    | otherwise   = let (tycon, ty_apps) = splitTyConApp t
-                        new_ty_apps = substitute from to ty_apps
-                    in  mkTyConApp tycon new_ty_apps
+    | otherwise   = substTy (TCvSubst emptyInScopeSet (unitVarEnv from to) emptyCvSubstEnv) t
 
 instance Substitutable Type Var where
   substitute from to v 
@@ -91,23 +137,35 @@ instance Substitutable Type CoreExpr where
                                               (substitute from to b)
                                               (substitute from to t)
                                               (substitute from to alts)
-  substitute from to (Cast b c) = Cast (substitute from to b) c
+  substitute from to (Cast b c) = Cast (substitute from to b) (substitute from to c)
   substitute from to (Tick t e) = Tick t (substitute from to e)
   substitute from to (Type t) = Type (substitute from to t)
-  substitute _ _ (Coercion c) = Coercion c
+  substitute from to (Coercion c) = Coercion $ substitute from to c
+
+instance Substitutable Type Coercion where
+  substitute from to coercion = let iss = emptyInScopeSet
+                                    tvenv = unitVarEnv from to
+                                    tcvenv = emptyCvSubstEnv
+                                    substt = TCvSubst iss tvenv tcvenv
+                                    res = substCo substt coercion 
+                                    s = showSDocUnsafe $ ppr res 
+                                in seq (unsafePerformIO (putStrLn s)) res -- substCo substt coercion
 instance Substitutable Type (Alt Var) where
+  substitute :: Var -> Type -> Alt Var -> Alt Var
   substitute from _ _
     | not (isTyVar from) = panic "impossible substitution of term-level var -> type"
   substitute from to (Alt alt_con bs e) = Alt alt_con 
                                               (substitute from to bs)
                                               (substitute from to e)
 instance Substitutable Type CoreBind where
+  substitute :: Var -> Type -> CoreBind -> CoreBind
   substitute from _ _
     | not (isTyVar from) = panic "impossible substitution of term-level var -> type"
   substitute from to (NonRec b e) = NonRec (substitute from to b) (substitute from to e)
   substitute from to (Rec ls) = Rec $ substitute from to ls
 
 instance Substitutable Type (Id, CoreExpr) where
+  substitute :: Var -> Type -> (Id, CoreExpr) -> (Id, CoreExpr)
   substitute from _ _
     | not (isTyVar from) = panic "impossible substitution of term-level var -> type"
   substitute from to (lhs, rhs) = (substitute from to lhs, substitute from to rhs) 
