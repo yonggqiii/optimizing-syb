@@ -70,21 +70,15 @@ memoSpecModGuts mod_guts = do
   putMsgS "== Phase: Memoizing Specialization =="
   let all_binds    :: [CoreBind]  = mg_binds mod_guts
       function_map :: FunctionMap = initFunctionMap all_binds
-  -- traversals <- extractTraversals all_binds function_map
-  putMsgS $ show function_map
   TER { ter_program = traversal_extracted_program
       , ter_traversal_specs = spec_map
       , ter_traversal_ids = traversal_ids
       }                                           <- extractTraversals all_binds function_map
-  mapM_ (putMsg . ppr) traversal_ids
   new_program <- goElim traversal_extracted_program traversal_ids
-  -- prt new_program
-  -- forM_ new_program (putMsg . ppr)
   let swls = map initSpecializationWorkList spec_map
   (swls', new_program') <- specTraversals swls new_program
   final_pgm <- replaceProgramWithSpecializations new_program' swls'
   let new_mod_guts = mod_guts { mg_binds = final_pgm }
-  prt final_pgm
   return new_mod_guts
 
 {- First thing to do: get all functions that have traversals.
@@ -140,16 +134,16 @@ initFunctionMap pgm = let specialize_groups           = groupSpecializedFunction
                           -- result is just the combination of everything interesting
                       in  interesting_fns ++ interesting_specializations
 
--- | A 'BindLocation' describes the location of a 'CoreBind' within a 
--- 'CoreProgram'
-data BindLocation = TopLevelLocation -- ^ The location of a non-recursive 'CoreBind' or a recursive group
-                      Int -- ^ The index of the 'CoreProgram' this top-level find occurs in
-                  | RecLocation -- ^ The location of a bind within a recursive group
-                      Int -- ^ The index of the 'CoreProgram' the recursive group is located
-                      Int -- ^ The index of the bind pair within the recursive group
-  deriving (Show, Eq)
+-- -- | A 'BindLocation' describes the location of a 'CoreBind' within a 
+-- -- 'CoreProgram'
+-- data BindLocation = TopLevelLocation -- ^ The location of a non-recursive 'CoreBind' or a recursive group
+--                       Int -- ^ The index of the 'CoreProgram' this top-level find occurs in
+--                   | RecLocation -- ^ The location of a bind within a recursive group
+--                       Int -- ^ The index of the 'CoreProgram' the recursive group is located
+--                       Int -- ^ The index of the bind pair within the recursive group
+--   deriving (Show, Eq)
 
-type FunctionMap = [(BindLocation, [BindLocation])]
+type FunctionMap = [(Id, [Id])]
 
 -- | Gets all binds in a program that contain a specialize rule. It produces a 'FunctionMap'
 -- loc -> [locs] such that the LHS location is a bind with rules, and the RHS list of 
@@ -186,7 +180,7 @@ groupSpecializedFunctions pgm = aux pgm
           in  map_entries ++ r
 
         -- bux looks for a recursive group in a single variable
-        bux :: Var -> Maybe (BindLocation, [BindLocation])
+        bux :: Var -> Maybe (Id, [Id])
         bux v = do
               -- get all the rules in this bind
           let all_rules_of_bind = idCoreRules v
@@ -200,13 +194,14 @@ groupSpecializedFunctions pgm = aux pgm
             let rhs_of_spec_rules  = map ru_rhs spec_rules_of_bind
                 -- get those expressions as vars
                 rhs_as_vars        = getVarsFromExpressions rhs_of_spec_rules
-                -- get the vars as bind locations
-                rhs_as_bind_locs   = collectNonMaybes $ map (lookupBindName pgm) rhs_as_vars
-                -- get the LHS var as a bind location
-                lhs_bind_loc  = lookupBindNameForSure pgm v
-                -- create the map entry; RHS contains itself
-                map_entry          = (lhs_bind_loc, lhs_bind_loc : rhs_as_bind_locs)
-            return map_entry
+            return (v, v : rhs_as_vars)
+            --     -- get the vars as bind locations
+            --     rhs_as_bind_locs   = collectNonMaybes $ map (lookupBindName pgm) rhs_as_vars
+            --     -- get the LHS var as a bind location
+            --     lhs_bind_loc  = lookupBindNameForSure pgm v
+            --     -- create the map entry; RHS contains itself
+            --     map_entry          = (lhs_bind_loc, lhs_bind_loc : rhs_as_bind_locs)
+            -- return map_entry
 
 -- | Produces a 'FunctionMap' containing the binds that contain the target expression.
 bindsWithTargetExpr :: FunctionMap  -- ^ The current map so that duplicates are not added
@@ -222,14 +217,13 @@ bindsWithTargetExpr mp pgm = aux pgm
         -- Non-recursive bind case
         aux (NonRec b e : xs) 
             -- If the bind b is already part of the existing 'FunctionMap', don't bother
-            | loc_b `elemAnywhere` mp = rec_res
+            | b `elemAnywhere` mp = rec_res
             -- If the RHS contains the target expression, add that to the resulting 'FunctionMap'
-            | containsTargetExpr e    = (loc_b, [loc_b]) : rec_res
+            | containsTargetExpr e    = (b, [b]) : rec_res
             -- If none of the above, don't bother with this entry either
             | otherwise               = rec_res
-                -- 'loc_b' is the location of b in the full program 'pgm'
-          where loc_b   = lookupBindNameForSure pgm b
-                -- 'rec_res' is the recursive result of 'aux' applied to the remainder of the
+                
+          where -- 'rec_res' is the recursive result of 'aux' applied to the remainder of the
                 -- program, 'xs'
                 rec_res = aux xs
         -- Recursive group: search for binds among the group with the target expression, and the 
@@ -243,11 +237,10 @@ bindsWithTargetExpr mp pgm = aux pgm
         bux [] = []
         -- traverse the list of binds in the recursive group
         bux ((b, e) : bs)
-            | loc_b `elemAnywhere` mp = rec_res
-            | containsTargetExpr e    = (loc_b, [loc_b]) : rec_res
+            | b `elemAnywhere` mp = rec_res
+            | containsTargetExpr e    = (b, [b]) : rec_res
             | otherwise               = rec_res
-          where loc_b   = lookupBindNameForSure pgm b
-                rec_res = bux bs
+          where rec_res = bux bs
 
         
 {- As it turns out, the target expression looks something like 
@@ -270,10 +263,12 @@ filterSpecializationGroupsWithNoSpecializableTraversal [] _ = []
 filterSpecializationGroupsWithNoSpecializableTraversal ((loc, ls_locs) : xs) pgm 
   | any aux ls_locs = (loc, ls_locs) : rec_res
   | otherwise       = rec_res  
-  where aux :: BindLocation -> Bool
-        aux bind_location = let res = do (_, e) <- lookupAnyBindPair bind_location pgm
-                                         guard $ containsTargetExpr e
-                            in  isJust res
+  where aux :: Id -> Bool
+        aux lhs = let e = lookupTopLevelRHS lhs pgm
+                  in  containsTargetExpr e
+                  --     res = do e <- lookupTopLevelRHS lhs pgm
+                  --              guard $ containsTargetExpr e
+                  -- in  isJust res
         rec_res :: FunctionMap
         rec_res = filterSpecializationGroupsWithNoSpecializableTraversal xs pgm
 
@@ -300,23 +295,12 @@ containsTargetExpr (Tick _ e)            = containsTargetExpr e
 containsTargetExpr (Type _)              = False
 containsTargetExpr (Coercion _)          = False
 
-elemAsMap :: Eq a => a -> [(a,b)] -> Bool
-elemAsMap k m = k `elem` map fst m
-
 pushEntryToMapOfList :: Eq k => k -> v -> [(k, [v])] -> [(k, [v])]
 pushEntryToMapOfList k v [] = [(k, [v])]
 pushEntryToMapOfList k v ((lhs, rhs) : entries)
   | k == lhs = (lhs, rhs) : entries
   | otherwise = (lhs, rhs) : pushEntryToMapOfList k v entries
 
-
-
--- | Adjusts the top-level index of a bind location by some amount
-adjustTopLevelIndex :: Int -- ^ The amount to adjust
-                    -> BindLocation -- ^ The original 'BindLocation'
-                    -> BindLocation -- ^ The new 'BindLocation' after adjustment
-adjustTopLevelIndex i (TopLevelLocation j) = TopLevelLocation $ i + j
-adjustTopLevelIndex i (RecLocation j k) = RecLocation (i + j) k
 
 isRuleNameSpec :: RuleName -> Bool
 isRuleNameSpec name = let name_string = show name
@@ -333,7 +317,7 @@ collectNonMaybes [] = []
 collectNonMaybes (Just x : xs) = x : collectNonMaybes xs
 collectNonMaybes (_ : xs) = collectNonMaybes xs
 
-elemAnywhere :: BindLocation -> FunctionMap -> Bool
+elemAnywhere :: Id -> FunctionMap -> Bool
 elemAnywhere _ [] = False
 elemAnywhere loc ((k, v) : xs) = 
   loc == k || loc `elem` v || loc `elemAnywhere` xs 
@@ -357,63 +341,6 @@ lookupTopLevelRHS :: Id -> [CoreBind] -> CoreExpr
 lookupTopLevelRHS id' pgm = case lookupTopLevelRHS_maybe id' pgm of
   Just x -> x
   Nothing -> panic "the impossible happened... cannot find RHS of bind"
-
-lookupTopLevelBind :: BindLocation -> [CoreBind] -> Maybe CoreBind
-lookupTopLevelBind (TopLevelLocation i) ls = ls !? i
-lookupTopLevelBind (RecLocation i _) ls = ls !? i
-
-lookupAnyBindPairForSure :: BindLocation -> [CoreBind] -> (Var, Expr Var)
-lookupAnyBindPairForSure loc pgm = case lookupAnyBindPair loc pgm of
-  Just x -> x
-  Nothing -> panic "cannot look up bind pair!"
-
-lookupAnyBindPair :: BindLocation -> [CoreBind] -> Maybe (Var, Expr Var)
-lookupAnyBindPair _ [] = Nothing
-lookupAnyBindPair (TopLevelLocation 0) ((NonRec name expr) : _) = Just (name, expr)
-lookupAnyBindPair (TopLevelLocation _) ((Rec _) : _) = Nothing
-lookupAnyBindPair (TopLevelLocation i) (_ : xs) = lookupAnyBindPair (TopLevelLocation (i - 1)) xs
-lookupAnyBindPair (RecLocation 0 i) ((Rec ls) : _) = ls !? i
-lookupAnyBindPair (RecLocation _ _) ((NonRec _ _) : _) = Nothing
-lookupAnyBindPair (RecLocation i j) (_ : xs) = lookupAnyBindPair (RecLocation (i - 1) j) xs
-
--- | Obtains the location of a LHS variable in a program, except that the LHS variable is guaranteed to occur. 
--- For cases where this is not guaranteed, use 'lookupBindName'
-lookupBindNameForSure :: [CoreBind]   -- ^ The full program (must be full for indexing to work)
-                      -> Var          -- ^ The name of the LHS to search for
-                      -> BindLocation -- ^ The 'BindLocation' representing the location of the LHS variable in the program
-lookupBindNameForSure ls n = 
-  let r = lookupBindName ls n 
-  in  case r of
-        Just x -> x
-        Nothing -> panic "cannot lookup bind name!"
-
--- | Obtains the location of a LHS variable in a program
-lookupBindName :: [CoreBind]          -- ^ The full program (must be full for indexing to work)
-               -> Var                 -- ^ The name of the LHS to search for
-               -> Maybe BindLocation  -- ^ The 'BindLocation' representing the location of the LHS variable in the program
--- Nothing to see
-lookupBindName [] _ = Nothing
--- Straightforward for non-recursive bindings.
-lookupBindName (NonRec v _ : xs) name 
-  | name == v = Just $ TopLevelLocation 0
-  | otherwise = adjustTopLevelIndex 1 <$> lookupBindName xs name
--- Search through the recursive group; if not found, search through remainder of list 
-lookupBindName (Rec ls : xs) name = 
-    let group_search_result = RecLocation 0 <$> aux name ls
-        recursive_result    = adjustTopLevelIndex 1 <$> lookupBindName xs name
-    in  group_search_result <|> recursive_result
-  where aux :: Var -> [(Var, Expr Var)] -> Maybe Int
-        -- aux searches the list of binds in the recursive group
-        aux _ [] = Nothing
-        aux n ((name', _) : ys)
-          | n == name' = Just 0
-          | otherwise     = (+ 1) <$> aux n ys
-
-
-(!?) :: [a] -> Int -> Maybe a
-ls !? i | i < 0          = Nothing
-        | i >= length ls = Nothing
-        | otherwise      = Just (ls !! i)
 
 -- | This function determines if a 'Var' is the 'everywhere' function.
 isVarEverywhere :: Var -> Bool
@@ -540,7 +467,7 @@ extractTraversals program' (fn_map_entry : fn_map) = do
 
   -- Now is time to extract the traversals from the current map entry
   let (left_bindloc, right_bindlocs) = fn_map_entry
-      (_, left_expr)                 = lookupAnyBindPairForSure left_bindloc program
+      left_expr                      = lookupTopLevelRHS left_bindloc program
   -- left_bindloc is the bindlocation on the LHS of the map entry. That bind location 
   -- is a left_var = left_expr. Now we perform the extraction on left_expr
   TEER { teer_result_expr       = left_expr'
@@ -728,16 +655,16 @@ extractTraversalsFromExpression (Case e var t alts) bound_vars = do
           return (Alt alt_con names e' : alts', spec2 ++ spec1, subst2 ++ subst1, binds1 ++ binds2, ids1 ++ ids2)
 
 pushTraversals :: CoreProgram 
-               -> [BindLocation] 
+               -> [Id] 
                -> SpecializationMap 
                -> SubstitutionMap 
                -> CoreM (CoreProgram, SpecializationMap)
 pushTraversals pgm [] spec_map _ = return (pgm, spec_map)
-pushTraversals pgm' (bind_loc : bind_locs) spec_map' subst_map = do
-  (pgm, spec_map) <- pushTraversals pgm' bind_locs spec_map' subst_map
-  let (lhs, rhs) = lookupAnyBindPairForSure bind_loc pgm
+pushTraversals pgm' (id' : ids) spec_map' subst_map = do
+  (pgm, spec_map) <- pushTraversals pgm' ids spec_map' subst_map
+  let rhs = lookupTopLevelRHS id' pgm
   (rhs', specs) <- pushTraversalsIntoExpression rhs subst_map []
-  let new_pgm = updateBind bind_loc rhs' pgm
+  let new_pgm = updateBind id' rhs' pgm
   return (new_pgm, specs ++ spec_map)
 
 createTraversalFunctionType :: Type -- ^ type of everywhere f
@@ -944,68 +871,19 @@ getOccurringVariables (Tick _ e) bvs = getOccurringVariables e bvs
 getOccurringVariables (Type _) _ = []
 getOccurringVariables (Coercion _) _ = []
 
--- substituteExpression :: Var -> Var -> Expr Var -> Expr Var
--- substituteExpression from to (Var i)
---   | from == i = Var to
---   | otherwise = Var i
--- substituteExpression _ _ (Lit l) = Lit l
--- substituteExpression from to (App f x) = App (substituteExpression from to f) (substituteExpression from to x)
--- substituteExpression from to (Lam b e)
---     | from == b = Lam to e'
---     | otherwise = Lam b e'
---   where e' = substituteExpression from to e
--- substituteExpression from to (Let binds e) = Let (aux binds) e'
---   where aux :: Bind Var -> Bind Var
---         aux (NonRec lhs rhs)
---           | lhs == from = NonRec to rhs'
---           | otherwise   = NonRec lhs rhs'
---           where rhs' = substituteExpression from to rhs
---         aux (Rec ls) = Rec $ map bux ls
---         bux :: (Var, Expr Var) -> (Var, Expr Var)
---         bux (lhs, rhs)
---           | lhs == from = (to, rhs')
---           | otherwise   = (lhs, rhs')
---           where rhs' = substituteExpression from to rhs
---         e' = substituteExpression from to e
--- substituteExpression from to (Case e name t alts) 
---   | from == name = Case e' to t alts'
---   | otherwise    = Case e' name t alts'
---   where e' = substituteExpression from to e
---         alts' = map bux alts
---         bux :: Alt Var -> Alt Var
---         bux (Alt ac names e'') = Alt ac names' e'''
---           where names' = map cux names
---                 e'''   = substituteExpression from to e''
---         cux :: Var -> Var
---         cux n | from == n = to
---               | otherwise = n
--- substituteExpression from to (Cast e c) = Cast (substituteExpression from to e) c
--- substituteExpression from to (Tick c e) = Tick c (substituteExpression from to e)
--- substituteExpression from to (Type t) = Type $ substituteType from to t
--- substituteExpression _ _ x = x
---
--- substituteType :: Var -> Var -> Type -> Type
--- substituteType from to t
---   | isTyVarTy t = let tv = do tv' <- getTyVar_maybe t
---                               guard $ tv' == from
---                               return $ mkTyVarTy to
---                   in  fromMaybe t tv
---   | otherwise   = let (tycon, ty_apps) = splitTyConApp t
---                       new_ty_apps = map (substituteType from to) ty_apps
---                   in  mkTyConApp tycon new_ty_apps
-
-updateBind :: BindLocation -> CoreExpr -> CoreProgram -> CoreProgram
-updateBind _ _ [] = panic "the impossible happened; cannot update bind!"
-updateBind (TopLevelLocation 0) _ (Rec _ : _) = panic "the impossible happened; cannot update non recursive bind at location with recursive bind"
-updateBind (TopLevelLocation 0) rhs (b : bs) = let (NonRec lhs _) = b
-                                               in   NonRec lhs rhs : bs
-updateBind (TopLevelLocation i) rhs (x : xs) = x : updateBind (TopLevelLocation (i - 1)) rhs xs
-updateBind (RecLocation 0 j) rhs pgm = let (Rec ls) = head pgm
-                                       in  Rec (aux j ls) : tail pgm
-  where aux i [] = []
-        aux 0 ((lhs, _) : xs) = (lhs, rhs) : xs
-        aux j (x : xs) = x : aux (j - 1) xs
-updateBind (RecLocation i j) rhs (x : xs) = x : updateBind (RecLocation (i - 1) j) rhs xs
+updateBind :: Id -> CoreExpr -> CoreProgram -> CoreProgram
+updateBind id' _ [] = pprPanic "cannot look for bind!" (ppr id')
+updateBind id' rhs (NonRec b e : binds)
+  | id' == b = NonRec b rhs : binds
+  | otherwise = NonRec b e : updateBind id' rhs binds
+updateBind id' rhs (Rec ls : binds) 
+  | id' `elem` map fst ls = Rec (aux ls) : binds
+  | otherwise = Rec ls : updateBind id' rhs binds
+  where aux :: [(Id, CoreExpr)] -> [(Id, CoreExpr)]
+        aux [] = pprPanic "cannot look for bind!" (ppr id')
+        aux ((lhs, rhs') : xs) 
+          | lhs == id' = (lhs, rhs) : xs
+          | otherwise  = (lhs, rhs') : aux xs
 
 {- Next step: Go elimination. 
  -
@@ -1047,8 +925,8 @@ goElim pgm' (x : xs) = do
   pgm <- goElim pgm' xs
   let rhs = lookupTopLevelRHS x pgm
   rhs' <- goElimTraversal x rhs
-  let bindLoc = lookupBindNameForSure pgm x 
-  let pgm'' = updateBind bindLoc rhs' pgm
+  -- let bindLoc = lookupBindNameForSure pgm x 
+  let pgm'' = updateBind x rhs' pgm
   return pgm''
 
 goElimTraversal :: Id -> CoreExpr -> CoreM CoreExpr
@@ -1155,76 +1033,6 @@ destructureTraversal (Everywhere scheme transformation type_arg dict_arg) bvs =
 destructureTraversal (Lam b e) bvs = destructureTraversal e (b : bvs)
 destructureTraversal _ _ = panic "the impossible happened! the traversal has a different structure than originally intended"
 
-replaceProgramWithSpecializations :: CoreProgram -> [SpecializationWorklist] -> CoreM CoreProgram
-replaceProgramWithSpecializations pgm swls = do
-  let ls = map (\x -> (swl_traversal_id x, swl_completed x)) swls
-  replaceProgramWithSpecs pgm ls
-
-
-replaceProgramWithSpecs :: CoreProgram -> [(Id, [(Type, Id)])] -> CoreM CoreProgram
-replaceProgramWithSpecs pgm [] = return pgm
-replaceProgramWithSpecs pgm' ((lhs, specs) : ls) = do
-  pgm <- replaceProgramWithSpecs pgm' ls
-  pgm2 <- replaceProgramWithSpec lhs specs pgm
-  return pgm2
-
-replaceProgramWithSpec :: Id -> [(Type, Id)] -> CoreProgram -> CoreM CoreProgram
-replaceProgramWithSpec _ _ [] = return []
-replaceProgramWithSpec lhs specs (x : xs) = do
-  xs' <- replaceProgramWithSpec lhs specs xs
-  x' <- replaceBindWithSpec lhs specs x
-  return $ x' : xs'
-
-replaceBindWithSpec :: Id -> [(Type, Id)] -> CoreBind -> CoreM CoreBind
-replaceBindWithSpec lhs specs (NonRec b e) = do
-  e' <- replaceExprWithSpec lhs specs e
-  return $ NonRec b e'
-replaceBindWithSpec lhs specs (Rec ls) = do
-  ls' <- mapM (replacePairsWithSpec lhs specs) ls
-  return $ Rec ls'
-
-replacePairsWithSpec :: Id -> [(Type, Id)] -> (Id, CoreExpr) -> CoreM (Id, CoreExpr)
-replacePairsWithSpec lhs specs (i, e) = do
-  e' <- replaceExprWithSpec lhs specs e 
-  return (i, e')
-
-replaceExprWithSpec :: Id -> [(Type, Id)] -> CoreExpr -> CoreM CoreExpr
-replaceExprWithSpec lhs specs (App (App (Var i) (Type t)) _)
-  | i == lhs && any (\(x, _) -> deBruijnize x == deBruijnize t) specs = do
-      -- get the actual spec
-      let Just new_id = lookup (deBruijnize t) (map (\(x, y) -> (deBruijnize x, y)) specs)
-      return $ Var new_id 
-replaceExprWithSpec lhs specs (App f x) = do
-  f' <- replaceExprWithSpec lhs specs f
-  x' <- replaceExprWithSpec lhs specs x
-  return $ App f' x'
-replaceExprWithSpec lhs specs (Lam b e) = do
-  e' <- replaceExprWithSpec lhs specs e
-  return $ Lam b e'
-replaceExprWithSpec lhs specs (Let b e) = do
-  b' <- replaceBindWithSpec lhs specs b
-  e' <- replaceExprWithSpec lhs specs e
-  return $ Let b' e'
-
-replaceExprWithSpec lhs specs (Case e b t alts) = do
-  e' <- replaceExprWithSpec lhs specs e
-  alts' <- mapM (replaceAltsWithSpec lhs specs) alts
-  return $ Case e' b t alts'
-replaceExprWithSpec lhs specs (Cast e c) = do
-  e' <- replaceExprWithSpec lhs specs e
-  return $ Cast e' c
-replaceExprWithSpec lhs specs (Tick c e) = do
-  e' <- replaceExprWithSpec lhs specs e
-  return $ Tick c e'
-replaceExprWithSpec _ _ e = return e
-
-replaceAltsWithSpec :: Id -> [(Type, Id)] -> Alt Var -> CoreM (Alt Var)
-replaceAltsWithSpec lhs specs (Alt ac ls e) = do 
-  e' <- replaceExprWithSpec lhs specs e
-  return $ Alt ac ls e'
-  
-
-
 data SpecializationWorklist = SWL { swl_traversal_id :: Id
                                   , swl_worklist :: [(Type, CoreExpr)]
                                   , swl_completed :: [(Type, Id)] }
@@ -1282,7 +1090,7 @@ optimizeSpecialization :: Id -> CoreExpr -> CoreM (CoreExpr, [(Type, CoreExpr)])
 optimizeSpecialization gen_traversal_id spec_rhs = do
   rhs' <- genericElimination spec_rhs
   let rhs = betaReduceCompletely rhs' deBruijnize
-  -- prt rhs
+  prt rhs
   let specs = getSpecializations gen_traversal_id [] rhs
   -- prt specs
   return (rhs, specs)
@@ -1362,7 +1170,8 @@ genericElimination x = return x
 
 fullyElaborateDFunUnfoldingsLikeCrazy :: CoreExpr -> CoreM CoreExpr
 fullyElaborateDFunUnfoldingsLikeCrazy x = do
-  x' <- fullyElaborateDFunUnfoldings x
+  -- x' <- fullyElaborateDFunUnfoldings x
+  x' <- fullyElaborateLHS x
   if deBruijnize x == deBruijnize x' then
       return x
   else 
@@ -1450,3 +1259,74 @@ instance GetSpecializations CoreBind where
 
 instance GetSpecializations(Id, CoreExpr) where
   getSpecializations gen_traversal_id bvs (var, e) = getSpecializations gen_traversal_id (var : bvs) e
+
+replaceProgramWithSpecializations :: CoreProgram -> [SpecializationWorklist] -> CoreM CoreProgram
+replaceProgramWithSpecializations pgm swls = do
+  let ls = map (\x -> (swl_traversal_id x, swl_completed x)) swls
+  replaceProgramWithSpecs pgm ls
+
+
+replaceProgramWithSpecs :: CoreProgram -> [(Id, [(Type, Id)])] -> CoreM CoreProgram
+replaceProgramWithSpecs pgm [] = return pgm
+replaceProgramWithSpecs pgm' ((lhs, specs) : ls) = do
+  pgm <- replaceProgramWithSpecs pgm' ls
+  pgm2 <- replaceProgramWithSpec lhs specs pgm
+  return pgm2
+
+replaceProgramWithSpec :: Id -> [(Type, Id)] -> CoreProgram -> CoreM CoreProgram
+replaceProgramWithSpec _ _ [] = return []
+replaceProgramWithSpec lhs specs (x : xs) = do
+  xs' <- replaceProgramWithSpec lhs specs xs
+  x' <- replaceBindWithSpec lhs specs x
+  return $ x' : xs'
+
+replaceBindWithSpec :: Id -> [(Type, Id)] -> CoreBind -> CoreM CoreBind
+replaceBindWithSpec lhs specs (NonRec b e) = do
+  e' <- replaceExprWithSpec lhs specs e
+  return $ NonRec b e'
+replaceBindWithSpec lhs specs (Rec ls) = do
+  ls' <- mapM (replacePairsWithSpec lhs specs) ls
+  return $ Rec ls'
+
+replacePairsWithSpec :: Id -> [(Type, Id)] -> (Id, CoreExpr) -> CoreM (Id, CoreExpr)
+replacePairsWithSpec lhs specs (i, e) = do
+  e' <- replaceExprWithSpec lhs specs e 
+  return (i, e')
+
+replaceExprWithSpec :: Id -> [(Type, Id)] -> CoreExpr -> CoreM CoreExpr
+replaceExprWithSpec lhs specs (App (App (Var i) (Type t)) _)
+  | i == lhs && any (\(x, _) -> deBruijnize x == deBruijnize t) specs = do
+      -- get the actual spec
+      let Just new_id = lookup (deBruijnize t) (map (\(x, y) -> (deBruijnize x, y)) specs)
+      return $ Var new_id 
+replaceExprWithSpec lhs specs (App f x) = do
+  f' <- replaceExprWithSpec lhs specs f
+  x' <- replaceExprWithSpec lhs specs x
+  return $ App f' x'
+replaceExprWithSpec lhs specs (Lam b e) = do
+  e' <- replaceExprWithSpec lhs specs e
+  return $ Lam b e'
+replaceExprWithSpec lhs specs (Let b e) = do
+  b' <- replaceBindWithSpec lhs specs b
+  e' <- replaceExprWithSpec lhs specs e
+  return $ Let b' e'
+
+replaceExprWithSpec lhs specs (Case e b t alts) = do
+  e' <- replaceExprWithSpec lhs specs e
+  alts' <- mapM (replaceAltsWithSpec lhs specs) alts
+  return $ Case e' b t alts'
+replaceExprWithSpec lhs specs (Cast e c) = do
+  e' <- replaceExprWithSpec lhs specs e
+  return $ Cast e' c
+replaceExprWithSpec lhs specs (Tick c e) = do
+  e' <- replaceExprWithSpec lhs specs e
+  return $ Tick c e'
+replaceExprWithSpec _ _ e = return e
+
+replaceAltsWithSpec :: Id -> [(Type, Id)] -> Alt Var -> CoreM (Alt Var)
+replaceAltsWithSpec lhs specs (Alt ac ls e) = do 
+  e' <- replaceExprWithSpec lhs specs e
+  return $ Alt ac ls e'
+  
+
+

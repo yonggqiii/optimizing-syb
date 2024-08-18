@@ -30,8 +30,8 @@ import Data.Generics
 --
 -- data List a = EmptyList | Cons a (List a)
 --   deriving (Typeable, Show, Data)
-
-
+--
+--
 incS :: Float -> Salary -> Salary
 incS k (S s) = S (s * (1 + k))
 
@@ -39,7 +39,8 @@ incNum :: Float -> Int -> Int -> Int
 incNum a b c = floor a + b + c
 
 
-increase :: Data a => Float -> a -> a
+increase :: Float -> Company -> Company
+-- increase :: Data a => Float -> a -> a
 increase k = everywhere $ mkT (incS k)
 
 -- anotherIncrease :: Data a => Float -> a -> a
@@ -48,7 +49,7 @@ increase k = everywhere $ mkT (incS k)
 --       f = mkT $ incS k
 --   in everywhere f 
 -- {-# SPECIALIZE increase :: Float -> List Dept -> List Dept #-}
-{-# SPECIALIZE increase :: Float -> Company -> Company #-}
+-- {-# SPECIALIZE increase :: Float -> Company -> Company #-}
 -- {-# SPECIALIZE increase :: Float -> TreeLike Company Int -> TreeLike Company Int #-}
 -- {-# SPECIALIZE increase :: Float -> [Dept] -> [Dept] #-}
 -- {-# SPECIALIZE increase :: Float -> Employee -> Employee #-}

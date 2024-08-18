@@ -24,6 +24,7 @@ import GHC.Plugins
       splitFunTy,
       splitTyConApp,
       splitTyConApp_maybe,
+      splitAppTy_maybe,
       isTyVar,
       updateVarType,
       emptyInScopeSet,
@@ -32,7 +33,7 @@ import GHC.Plugins
       ppr,
       showSDocUnsafe,
       TCvSubst(TCvSubst),
-      isCoVarType, 
+      isCoVarType, mkAppTy,
       )
 import GHC.Core.Coercion (substCo)
 import GHC.Core.Type (substTy)
@@ -81,6 +82,8 @@ instance Substitutable Var Type where
     | Just (tycon, ty_apps) <- splitTyConApp_maybe t
       = let new_ty_apps = substitute from to ty_apps
         in  mkTyConApp tycon new_ty_apps
+    | Just (lhs, rhs) <- splitAppTy_maybe t
+      = mkAppTy (substitute from to lhs) (substitute from to rhs)
     | otherwise   = panic "wtf?" 
     -- let (tycon, ty_apps) = splitTyConApp t
     --                     new_ty_apps = substitute from to ty_apps
@@ -114,6 +117,8 @@ instance Substitutable Type Type where
     | Just (tycon, ty_apps) <- splitTyConApp_maybe t
       = let new_ty_apps = substitute from to ty_apps
         in  mkTyConApp tycon new_ty_apps
+    | Just (lhs, rhs) <- splitAppTy_maybe t
+      = mkAppTy (substitute from to lhs) (substitute from to rhs)
   -- | Substitutes type variables to types in a type
     | otherwise   = substTy (TCvSubst emptyInScopeSet (unitVarEnv from to) emptyCvSubstEnv) t
 
