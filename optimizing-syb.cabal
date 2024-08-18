@@ -74,6 +74,8 @@ library
                   , Engines.KnownCase
                   , Engines.Substitution
                   , Engines.DropCasts
+                  , Engines.Transform
+                  , Engines.LeftElaboration
                   , Utils
 
     -- LANGUAGE extensions used by modules in this package.

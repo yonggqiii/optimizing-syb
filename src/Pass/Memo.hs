@@ -11,6 +11,7 @@ import Data.Maybe
 import GHC.Core.Map.Type
 import Engines.DropCasts (DropCasts(dropCasts))
 import GHC.IO (unsafePerformIO)
+import Engines.Transform
 
 
 {- This phase should come before all the other optimization phases 
@@ -1088,12 +1089,62 @@ isSpecCompleted t ls = let types = map fst ls
 
 optimizeSpecialization :: Id -> CoreExpr -> CoreM (CoreExpr, [(Type, CoreExpr)])
 optimizeSpecialization gen_traversal_id spec_rhs = do
-  rhs' <- genericElimination spec_rhs
+  -- rhs' <- genericElimination spec_rhs
+  rhs' <- transform gmapTDestructurer gmapTTransformer spec_rhs
   let rhs = betaReduceCompletely rhs' deBruijnize
   prt rhs
   let specs = getSpecializations gen_traversal_id [] rhs
   -- prt specs
   return (rhs, specs)
+
+gmapTDestructurer :: CoreExpr -> Maybe (Id, Type, CoreExpr)
+gmapTDestructurer (App (App (Var v) (Type t)) d)
+  | nameStableString (varName v) == "$base$Data.Data$gmapT"
+    = return (v, t, d)
+gmapTDestructurer _ = Nothing
+
+gmapTTransformer :: (Id, Type, CoreExpr) -> CoreM CoreExpr
+gmapTTransformer (v, t, d) = do
+      let uf = unfoldingTemplate $ realIdUnfolding v
+      d' <- fullyElaborateDFunUnfoldingsLikeCrazy d
+      --putMsgS%%%"DICTIONARY"
+      --prt%%%d'
+      --putMsgS%%%"BETA REDUCING"
+      let x = betaReduceCompletely (App (App uf (Type t)) d') deBruijnize
+      --prt%%%x
+      --putMsgS%%%"CASE OF KNOWN CASE"
+      let x' = caseOfKnownCase x
+      --prt%%%x'
+      --putMsgS%%%"DROP CASTS"
+      let y = dropCasts x'
+      --prt%%%y
+      let type_specific_gmapT = y
+      --prt%%%type_specific_gmapT
+      --putMsgS%%%"UNFOLDING ACTUAL GMAPT"
+      tttt <- fullyElaborateDFunUnfoldingsLikeCrazy type_specific_gmapT
+      --prt%%%tttt
+      -- let (Var v') = type_specific_gmapT
+      -- --prt%%%$ exprType (Var v')
+      -- --prt%%%$ unfoldingTemplate $ realIdUnfolding v
+      --putMsgS%%%"DROP CASTS"
+      let tttttt = dropCasts tttt
+      --prt%%%tttttt
+      --putMsgS%%%"UNFOLDING GUNFOLD IN CASE"
+      tttttttt' <- fullyElaborateLHS tttttt
+      --prt%%%tttttttt'
+      --putMsgS%%%"Let-Inlining"
+      let tttttttt'' = letInline tttttttt'
+      --prt%%%tttttttt''
+      --putMsgS%%%"Beta Reduction"
+      let xxx123 = betaReduceCompletely tttttttt'' deBruijnize
+      --prt%%%xxx123
+      --putMsgS%%%"DROP CASTS"
+      let actual_gmapT = dropCasts $ xxx123
+      --prt%%%actual_gmapT
+
+      return actual_gmapT
+
+
 
 -- TODO: make this proper
 genericElimination :: CoreExpr -> CoreM CoreExpr
