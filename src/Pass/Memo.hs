@@ -11,7 +11,9 @@ import Data.Maybe
 import GHC.Core.Map.Type
 import Engines.DropCasts (DropCasts(dropCasts))
 import GHC.IO (unsafePerformIO)
+import Engines.LeftElaboration
 import Engines.Transform
+import Engines.InlineUnfolding (inlineId)
 
 
 {- This phase should come before all the other optimization phases 
@@ -1090,12 +1092,57 @@ isSpecCompleted t ls = let types = map fst ls
 optimizeSpecialization :: Id -> CoreExpr -> CoreM (CoreExpr, [(Type, CoreExpr)])
 optimizeSpecialization gen_traversal_id spec_rhs = do
   -- rhs' <- genericElimination spec_rhs
-  rhs' <- transform gmapTDestructurer gmapTTransformer spec_rhs
+  rhs' <- fullTransform gmapTEliminator spec_rhs --transform gmapTDestructurer gmapTTransformer spec_rhs
   let rhs = betaReduceCompletely rhs' deBruijnize
   prt rhs
   let specs = getSpecializations gen_traversal_id [] rhs
   -- prt specs
   return (rhs, specs)
+
+gmapTEliminator :: CoreExpr -> CoreM CoreExpr
+gmapTEliminator (App (App (Var v) (Type t)) d)
+  | nameStableString (varName v) == "$base$Data.Data$gmapT"
+    = do
+          let uf = unfoldingTemplate $ realIdUnfolding v
+          d' <- leftInlineLikeCrazy d
+          --putMsgS%%%"DICTIONARY"
+          --prt%%%d'
+          --putMsgS%%%"BETA REDUCING"
+          -- let x = betaReduceCompletely' (App (App uf (Type t)) d') deBruijnize
+          x <- betaReduceCompletely' (App (App uf (Type t)) d')
+          --prt%%%x
+          --putMsgS%%%"CASE OF KNOWN CASE"
+          let x' = caseOfKnownCase x
+          --prt%%%x'
+          --putMsgS%%%"DROP CASTS"
+          let y = dropCasts x'
+          --prt%%%y
+          let type_specific_gmapT = y
+          --prt%%%type_specific_gmapT
+          --putMsgS%%%"UNFOLDING ACTUAL GMAPT"
+          tttt <- leftInlineLikeCrazy type_specific_gmapT
+          --prt%%%tttt
+          -- let (Var v') = type_specific_gmapT
+          -- --prt%%%$ exprType (Var v')
+          -- --prt%%%$ unfoldingTemplate $ realIdUnfolding v
+          --putMsgS%%%"DROP CASTS"
+          let tttttt = dropCasts tttt
+          --prt%%%tttttt
+          --putMsgS%%%"UNFOLDING GUNFOLD IN CASE"
+          tttttttt' <- leftInlineLikeCrazy tttttt
+          --prt%%%tttttttt'
+          --putMsgS%%%"Let-Inlining"
+          let tttttttt'' = letInline tttttttt'
+          --prt%%%tttttttt''
+          --putMsgS%%%"Beta Reduction"
+          let xxx123 = betaReduceCompletely tttttttt'' deBruijnize
+          --prt%%%xxx123
+          --putMsgS%%%"DROP CASTS"
+          let actual_gmapT = dropCasts $ xxx123
+          --prt%%%actual_gmapT
+          return actual_gmapT
+gmapTEliminator x = return x
+
 
 gmapTDestructurer :: CoreExpr -> Maybe (Id, Type, CoreExpr)
 gmapTDestructurer (App (App (Var v) (Type t)) d)
@@ -1103,10 +1150,11 @@ gmapTDestructurer (App (App (Var v) (Type t)) d)
     = return (v, t, d)
 gmapTDestructurer _ = Nothing
 
+-- TODO: make this proper
 gmapTTransformer :: (Id, Type, CoreExpr) -> CoreM CoreExpr
 gmapTTransformer (v, t, d) = do
       let uf = unfoldingTemplate $ realIdUnfolding v
-      d' <- fullyElaborateDFunUnfoldingsLikeCrazy d
+      d' <- leftInlineLikeCrazy d
       --putMsgS%%%"DICTIONARY"
       --prt%%%d'
       --putMsgS%%%"BETA REDUCING"
@@ -1121,7 +1169,7 @@ gmapTTransformer (v, t, d) = do
       let type_specific_gmapT = y
       --prt%%%type_specific_gmapT
       --putMsgS%%%"UNFOLDING ACTUAL GMAPT"
-      tttt <- fullyElaborateDFunUnfoldingsLikeCrazy type_specific_gmapT
+      tttt <- leftInlineLikeCrazy type_specific_gmapT
       --prt%%%tttt
       -- let (Var v') = type_specific_gmapT
       -- --prt%%%$ exprType (Var v')
@@ -1130,7 +1178,7 @@ gmapTTransformer (v, t, d) = do
       let tttttt = dropCasts tttt
       --prt%%%tttttt
       --putMsgS%%%"UNFOLDING GUNFOLD IN CASE"
-      tttttttt' <- fullyElaborateLHS tttttt
+      tttttttt' <- leftInlineLikeCrazy tttttt
       --prt%%%tttttttt'
       --putMsgS%%%"Let-Inlining"
       let tttttttt'' = letInline tttttttt'
@@ -1144,137 +1192,11 @@ gmapTTransformer (v, t, d) = do
 
       return actual_gmapT
 
-
-
--- TODO: make this proper
-genericElimination :: CoreExpr -> CoreM CoreExpr
-genericElimination (App (App (Var v) (Type t)) d)
-  | nameStableString (varName v) == "$base$Data.Data$gmapT" = do
-      --putMsgS%%%"FOUND"
-      --prt%%%v
-      let uf = unfoldingTemplate $ realIdUnfolding v
-      d' <- fullyElaborateDFunUnfoldingsLikeCrazy d
-      --putMsgS%%%"DICTIONARY"
-      --prt%%%d'
-      --putMsgS%%%"BETA REDUCING"
-      let x = betaReduceCompletely (App (App uf (Type t)) d') deBruijnize
-      --prt%%%x
-      --putMsgS%%%"CASE OF KNOWN CASE"
-      let x' = caseOfKnownCase x
-      --prt%%%x'
-      --putMsgS%%%"DROP CASTS"
-      let y = dropCasts x'
-      --prt%%%y
-      let type_specific_gmapT = y
-      --prt%%%type_specific_gmapT
-      --putMsgS%%%"UNFOLDING ACTUAL GMAPT"
-      tttt <- fullyElaborateDFunUnfoldingsLikeCrazy type_specific_gmapT
-      --prt%%%tttt
-      -- let (Var v') = type_specific_gmapT
-      -- --prt%%%$ exprType (Var v')
-      -- --prt%%%$ unfoldingTemplate $ realIdUnfolding v
-      --putMsgS%%%"DROP CASTS"
-      let tttttt = dropCasts tttt
-      --prt%%%tttttt
-      --putMsgS%%%"UNFOLDING GUNFOLD IN CASE"
-      tttttttt' <- fullyElaborateLHS tttttt
-      --prt%%%tttttttt'
-      --putMsgS%%%"Let-Inlining"
-      let tttttttt'' = letInline tttttttt'
-      --prt%%%tttttttt''
-      --putMsgS%%%"Beta Reduction"
-      let xxx123 = betaReduceCompletely tttttttt'' deBruijnize
-      --prt%%%xxx123
-      --putMsgS%%%"DROP CASTS"
-      let actual_gmapT = dropCasts $ xxx123
-      --prt%%%actual_gmapT
-
-      return actual_gmapT
-    
--- genericElimination (Var v)
---   | nameStableString (varName v) == "$base$Data.Data$gmapT" = do
---       --putMsgS%%%"FOUND"
---       --prt%%%v
---       let uf = unfoldingTemplate $ realIdUnfolding v
---       return uf
---   | otherwise = return (Var v)
-genericElimination (Lam b e) = 
-  do e' <- genericElimination e
-     return $ Lam b e'
-genericElimination (App f x) =
-  do f' <- genericElimination f
-     x' <- genericElimination x
-     return (App f' x')
-genericElimination (Let b e) = do
-  e' <- genericElimination e
-  return $ Let b e'
-genericElimination (Case e b t alts) = do
-  e' <- genericElimination e
-  return $ Case e' b t alts
-genericElimination (Cast e c) = do 
-  e' <- genericElimination e
-  return $ Cast e' c
-genericElimination (Tick c e) = do
-  e' <- genericElimination e
-  return $ Tick c e'
-genericElimination x = return x
-
-fullyElaborateDFunUnfoldingsLikeCrazy :: CoreExpr -> CoreM CoreExpr
-fullyElaborateDFunUnfoldingsLikeCrazy x = do
-  -- x' <- fullyElaborateDFunUnfoldings x
-  x' <- fullyElaborateLHS x
-  if deBruijnize x == deBruijnize x' then
-      return x
-  else 
-      fullyElaborateDFunUnfoldingsLikeCrazy x'
-
--- TODO: handle more complex DFuns
-fullyElaborateDFunUnfoldings :: CoreExpr -> CoreM CoreExpr
-fullyElaborateDFunUnfoldings (Var v) = do
-  let uf = realIdUnfolding v
-  case uf of 
-    DFunUnfolding bndrs df_con df_args -> do
-      -- --prt%%%bndrs
-      -- --prt%%%df_con
-      -- --prt%%%$ dataConRepType df_con
-      -- --prt%%%df_args
-      let dfune = mkCoreConApps df_con df_args
-      let dfun = foldr Lam dfune bndrs
-      --putMsgS%%%"=== GENERATED DFUN ==="
-      --prt%%% dfun
-      return  dfun
-    CoreUnfolding tmpl _ _ _ _ -> do
-      return tmpl
-    OtherCon s -> do
-      --putMsgS%%%"=== OTHERCON ==="
-      --prt%%%v
-      return $ Var v
-    NoUnfolding -> do
-      --putMsgS%%%"=== NO UNFOLDING ==="
-      --prt%%%v
-      return $ Var v
-
-    _ -> do
-      --putMsgS%%%"=== NO UNFOLDING!? ==="
-      --prt%%%v
-      return $ Var v
-  -- --prt%%%uf
-  -- --putMsgS%%%" ==== above is unfolding term. lets see the template ===="
-  -- --prt%%%$ unfoldingTemplate uf
-  -- return $ Var v
-fullyElaborateDFunUnfoldings (App f x) = do
-  f' <- fullyElaborateDFunUnfoldings f
-  let res = betaReduceCompletely (App f' x) deBruijnize
-  return $ res
-fullyElaborateDFunUnfoldings x = return x
-
-fullyElaborateLHS :: CoreExpr -> CoreM CoreExpr
-fullyElaborateLHS (Var v) = fullyElaborateDFunUnfoldings (Var v)
-fullyElaborateLHS (Lam b e) = do e' <- fullyElaborateLHS e
-                                 return $ Lam b e'
-fullyElaborateLHS (App f x) = do f' <- fullyElaborateLHS f
-                                 return $ betaReduceCompletely (App f' x) deBruijnize
-fullyElaborateLHS x = return x
+leftInlineLikeCrazy :: CoreExpr -> CoreM CoreExpr
+leftInlineLikeCrazy = leftElaborationLikeCrazy extractor inlineId (`betaReduceCompletely` deBruijnize)
+  where extractor :: CoreExpr -> Maybe Id
+        extractor (Var v) = Just v
+        extractor _       = Nothing
 
 class GetSpecializations a where
   getSpecializations :: Id -> [Var] -> a -> [(Type, CoreExpr)]

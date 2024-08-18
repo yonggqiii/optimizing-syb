@@ -1,6 +1,62 @@
 module Engines.Transform where
 
 import GHC.Plugins
+    
+
+
+class FullTransform a b where
+  fullTransform :: Monad m => (a -> m a) -> b -> m b
+  fullTransformTillFixedPoint :: (Monad m, Eq c) => (b -> c) -> (a -> m a) -> b -> m b
+  fullTransformTillFixedPoint cmp f x
+    = do x' <- fullTransform f x
+         if cmp x == cmp x'
+         then return x
+         else fullTransformTillFixedPoint cmp f x'
+
+instance FullTransform CoreExpr CoreExpr where
+  fullTransform f (App a b)
+    = do a' <- fullTransform f a
+         b' <- fullTransform f b
+         f $ App a' b'
+  fullTransform f (Lam b e)
+    = do e' <- fullTransform f e
+         f $ Lam b e'
+  fullTransform f (Let b e)
+    = do e' <- fullTransform f e
+         b' <- fullTransform f b
+         f $ Let b' e'
+  fullTransform f (Case e b t alts)
+    = do e' <- fullTransform f e
+         alts' <- fullTransform f alts
+         f $ Case e' b t alts'
+  fullTransform f (Cast e c)
+    = do e' <- fullTransform f e
+         f $ Cast e' c
+  fullTransform f (Tick c e)
+    = do e' <- fullTransform f e
+         f $ Tick c e'
+  fullTransform f x = f x
+
+instance FullTransform a b => FullTransform a [b] where
+  fullTransform f = mapM $ fullTransform f 
+
+instance FullTransform CoreExpr CoreBind where
+  fullTransform f (NonRec b e)
+    = do e' <- fullTransform f e
+         return $ NonRec b e'
+  fullTransform f (Rec ls)
+    = do ls' <- fullTransform f ls
+         return $ Rec ls'
+
+instance FullTransform CoreExpr (Id, CoreExpr) where
+  fullTransform f (id', e)
+    = do e' <- fullTransform f e
+         return (id', e')
+
+instance FullTransform CoreExpr (Alt Var) where
+  fullTransform f (Alt alt_con bs e) 
+    = do e' <- fullTransform f e
+         return $ Alt alt_con bs e'
 
 class Transform a c where
   transform :: forall b. (a -> Maybe b) -> (b -> CoreM a) -> c -> CoreM c

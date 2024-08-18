@@ -3,6 +3,18 @@ module Engines.BetaReduction where
 import Engines.Substitution(substitute)
 import GHC.Plugins
 import GHC.IO (unsafePerformIO)
+import Engines.Transform
+import GHC.Core.Map.Type
+
+betaReducer :: Monad m => CoreExpr -> m CoreExpr
+betaReducer (App (Lam var rhs) x) = return $ substitute var x rhs
+betaReducer x = return x
+
+betaReduce' :: (FullTransform CoreExpr a, Monad m) => a -> m a
+betaReduce' = fullTransform betaReducer
+
+betaReduceCompletely' :: (Eq (DeBruijn a), FullTransform CoreExpr a, Monad m) => a -> m a
+betaReduceCompletely' = fullTransformTillFixedPoint deBruijnize betaReducer
 
 betaReduceCompletely :: (BetaReducible a, Eq b) => a -> (a -> b) -> a
 betaReduceCompletely e eq
