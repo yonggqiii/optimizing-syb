@@ -73,11 +73,13 @@ memoSpecModGuts mod_guts = do
   putMsgS "== Phase: Memoizing Specialization =="
   let all_binds    :: [CoreBind]  = mg_binds mod_guts
       function_map :: FunctionMap = initFunctionMap all_binds
+  showAllNames all_binds 
   TER { ter_program = traversal_extracted_program
       , ter_traversal_specs = spec_map
       , ter_traversal_ids = traversal_ids
       }                                           <- extractTraversals all_binds function_map
   new_program <- goElim traversal_extracted_program traversal_ids
+  -- prt new_program
   let swls = map initSpecializationWorkList spec_map
   (swls', new_program') <- specTraversals swls new_program
   final_pgm <- replaceProgramWithSpecializations new_program' swls'
@@ -351,7 +353,7 @@ isVarEverywhere v = let name = varName v
                         s    = nameStableString name
                         pre  = take 4 s
                         post = last' (length "$everywhere") s
-                    in  pre == "$syb" && post == "$everywhere"
+                    in  pre == "$syb" && (post == "$everywhere" || post == "everywhere'")
 
 -- | Determines if a 'Var' is the '($)' function
 isVarDollar :: Var -> Bool
@@ -942,12 +944,38 @@ goElimTraversal lhs rhs = do
   go_replacement <- mkGoReplacement lhs traversal_structure
   let unfolding_with_replaced_go = pushGoReplacementIntoInlinedUnfolding inlined_unfolding go_replacement
   let let_inlined_unfolding_with_replaced_go = letInline unfolding_with_replaced_go
-  let beta_reduced_let_inlined_go = betaReduceCompletely let_inlined_unfolding_with_replaced_go deBruijnize
+  -- let beta_reduced_let_inlined_go = betaReduceCompletely let_inlined_unfolding_with_replaced_go deBruijnize
+  beta_reduced_let_inlined_go <- betaReduceCompletelyM let_inlined_unfolding_with_replaced_go
   let rhs' = substitute scheme beta_reduced_let_inlined_go rhs
-  let rhs'' = betaReduceCompletely rhs' deBruijnize
+  -- let rhs'' = betaReduceCompletely rhs' deBruijnize
+  rhs'' <- betaReduceCompletelyM rhs'
   -- showAllTypes rhs''
   return rhs''
 
+class NameShow a where
+  showAllNames :: a -> CoreM ()
+
+
+instance NameShow CoreExpr where
+  showAllNames :: CoreExpr -> CoreM ()
+  showAllNames (Var v) = putMsgS $ nameStableString $ varName v
+  showAllNames (Lit id) = return ()
+  showAllNames (App f x) = do showAllNames f; showAllNames x
+  showAllNames (Lam _ rhs) = showAllNames rhs
+  showAllNames (Let lhs rhs) = do showAllNames lhs; showAllNames rhs
+  showAllNames (Case e' b t alts) = do showAllNames e'; showAllNames alts
+  showAllNames (Cast e c) = showAllNames e
+  showAllNames (Tick _ e) = showAllNames e
+  showAllNames e = return ()
+instance NameShow a => NameShow [a] where
+  showAllNames = mapM_ showAllNames
+instance NameShow CoreBind where
+  showAllNames (NonRec _ rhs) = showAllNames rhs
+  showAllNames (Rec ls) = showAllNames ls
+instance NameShow (Id, CoreExpr) where
+  showAllNames (_, e) = showAllNames e
+instance NameShow (Alt Var) where
+  showAllNames (Alt _ _ e) = showAllNames e
 class TypeShow a where
   showAllTypes :: a -> CoreM ()
 
@@ -1078,7 +1106,8 @@ specOneTraversal :: Id -> Type -> CoreExpr -> CoreProgram -> CoreM (Id, CoreExpr
 specOneTraversal t_id type_arg dict_arg pgm = do
   -- obtain the RHS of the traversal ID to specialize
   let traversal_rhs = lookupTopLevelRHS t_id pgm
-  let specialized_rhs = betaReduceCompletely (App (App traversal_rhs (Type type_arg)) dict_arg) deBruijnize
+  -- let specialized_rhs = betaReduceCompletely (App (App traversal_rhs (Type type_arg)) dict_arg) deBruijnize
+  specialized_rhs <- betaReduceCompletelyM (App (App traversal_rhs (Type type_arg)) dict_arg)
   specialized_id <- mkDerivedUniqueName t_id
   (final_rhs, new_specs) <- optimizeSpecialization t_id specialized_rhs 
   let final_spec_id = setIdType specialized_id (exprType final_rhs)
@@ -1092,8 +1121,9 @@ isSpecCompleted t ls = let types = map fst ls
 optimizeSpecialization :: Id -> CoreExpr -> CoreM (CoreExpr, [(Type, CoreExpr)])
 optimizeSpecialization gen_traversal_id spec_rhs = do
   -- rhs' <- genericElimination spec_rhs
-  rhs' <- fullTransform gmapTEliminator spec_rhs --transform gmapTDestructurer gmapTTransformer spec_rhs
-  let rhs = betaReduceCompletely rhs' deBruijnize
+  rhs' <- fullTransformM gmapTEliminator spec_rhs --transform gmapTDestructurer gmapTTransformer spec_rhs
+  -- let rhs = betaReduceCompletely rhs' deBruijnize
+  rhs <- betaReduceCompletelyM rhs'
   prt rhs
   let specs = getSpecializations gen_traversal_id [] rhs
   -- prt specs
@@ -1109,7 +1139,7 @@ gmapTEliminator (App (App (Var v) (Type t)) d)
           --prt%%%d'
           --putMsgS%%%"BETA REDUCING"
           -- let x = betaReduceCompletely' (App (App uf (Type t)) d') deBruijnize
-          x <- betaReduceCompletely' (App (App uf (Type t)) d')
+          x <- betaReduceCompletelyM (App (App uf (Type t)) d')
           --prt%%%x
           --putMsgS%%%"CASE OF KNOWN CASE"
           let x' = caseOfKnownCase x
@@ -1135,7 +1165,8 @@ gmapTEliminator (App (App (Var v) (Type t)) d)
           let tttttttt'' = letInline tttttttt'
           --prt%%%tttttttt''
           --putMsgS%%%"Beta Reduction"
-          let xxx123 = betaReduceCompletely tttttttt'' deBruijnize
+          -- let xxx123 = betaReduceCompletely tttttttt'' deBruijnize
+          xxx123 <- betaReduceCompletelyM tttttttt''
           --prt%%%xxx123
           --putMsgS%%%"DROP CASTS"
           let actual_gmapT = dropCasts $ xxx123
@@ -1143,57 +1174,8 @@ gmapTEliminator (App (App (Var v) (Type t)) d)
           return actual_gmapT
 gmapTEliminator x = return x
 
-
-gmapTDestructurer :: CoreExpr -> Maybe (Id, Type, CoreExpr)
-gmapTDestructurer (App (App (Var v) (Type t)) d)
-  | nameStableString (varName v) == "$base$Data.Data$gmapT"
-    = return (v, t, d)
-gmapTDestructurer _ = Nothing
-
--- TODO: make this proper
-gmapTTransformer :: (Id, Type, CoreExpr) -> CoreM CoreExpr
-gmapTTransformer (v, t, d) = do
-      let uf = unfoldingTemplate $ realIdUnfolding v
-      d' <- leftInlineLikeCrazy d
-      --putMsgS%%%"DICTIONARY"
-      --prt%%%d'
-      --putMsgS%%%"BETA REDUCING"
-      let x = betaReduceCompletely (App (App uf (Type t)) d') deBruijnize
-      --prt%%%x
-      --putMsgS%%%"CASE OF KNOWN CASE"
-      let x' = caseOfKnownCase x
-      --prt%%%x'
-      --putMsgS%%%"DROP CASTS"
-      let y = dropCasts x'
-      --prt%%%y
-      let type_specific_gmapT = y
-      --prt%%%type_specific_gmapT
-      --putMsgS%%%"UNFOLDING ACTUAL GMAPT"
-      tttt <- leftInlineLikeCrazy type_specific_gmapT
-      --prt%%%tttt
-      -- let (Var v') = type_specific_gmapT
-      -- --prt%%%$ exprType (Var v')
-      -- --prt%%%$ unfoldingTemplate $ realIdUnfolding v
-      --putMsgS%%%"DROP CASTS"
-      let tttttt = dropCasts tttt
-      --prt%%%tttttt
-      --putMsgS%%%"UNFOLDING GUNFOLD IN CASE"
-      tttttttt' <- leftInlineLikeCrazy tttttt
-      --prt%%%tttttttt'
-      --putMsgS%%%"Let-Inlining"
-      let tttttttt'' = letInline tttttttt'
-      --prt%%%tttttttt''
-      --putMsgS%%%"Beta Reduction"
-      let xxx123 = betaReduceCompletely tttttttt'' deBruijnize
-      --prt%%%xxx123
-      --putMsgS%%%"DROP CASTS"
-      let actual_gmapT = dropCasts $ xxx123
-      --prt%%%actual_gmapT
-
-      return actual_gmapT
-
 leftInlineLikeCrazy :: CoreExpr -> CoreM CoreExpr
-leftInlineLikeCrazy = leftElaborationLikeCrazy extractor inlineId (`betaReduceCompletely` deBruijnize)
+leftInlineLikeCrazy = leftElaborationLikeCrazy extractor inlineId (betaReduceCompletely)
   where extractor :: CoreExpr -> Maybe Id
         extractor (Var v) = Just v
         extractor _       = Nothing
@@ -1243,63 +1225,17 @@ replaceProgramWithSpecs :: CoreProgram -> [(Id, [(Type, Id)])] -> CoreM CoreProg
 replaceProgramWithSpecs pgm [] = return pgm
 replaceProgramWithSpecs pgm' ((lhs, specs) : ls) = do
   pgm <- replaceProgramWithSpecs pgm' ls
-  pgm2 <- replaceProgramWithSpec lhs specs pgm
+  pgm2 <- replaceWithSpecializations lhs specs pgm
   return pgm2
 
-replaceProgramWithSpec :: Id -> [(Type, Id)] -> CoreProgram -> CoreM CoreProgram
-replaceProgramWithSpec _ _ [] = return []
-replaceProgramWithSpec lhs specs (x : xs) = do
-  xs' <- replaceProgramWithSpec lhs specs xs
-  x' <- replaceBindWithSpec lhs specs x
-  return $ x' : xs'
-
-replaceBindWithSpec :: Id -> [(Type, Id)] -> CoreBind -> CoreM CoreBind
-replaceBindWithSpec lhs specs (NonRec b e) = do
-  e' <- replaceExprWithSpec lhs specs e
-  return $ NonRec b e'
-replaceBindWithSpec lhs specs (Rec ls) = do
-  ls' <- mapM (replacePairsWithSpec lhs specs) ls
-  return $ Rec ls'
-
-replacePairsWithSpec :: Id -> [(Type, Id)] -> (Id, CoreExpr) -> CoreM (Id, CoreExpr)
-replacePairsWithSpec lhs specs (i, e) = do
-  e' <- replaceExprWithSpec lhs specs e 
-  return (i, e')
-
-replaceExprWithSpec :: Id -> [(Type, Id)] -> CoreExpr -> CoreM CoreExpr
-replaceExprWithSpec lhs specs (App (App (Var i) (Type t)) _)
+  
+replaceExprWithSpec' :: Id -> [(Type, Id)] -> CoreExpr -> CoreM CoreExpr
+replaceExprWithSpec' lhs specs (App (App (Var i) (Type t)) _)
   | i == lhs && any (\(x, _) -> deBruijnize x == deBruijnize t) specs = do
       -- get the actual spec
       let Just new_id = lookup (deBruijnize t) (map (\(x, y) -> (deBruijnize x, y)) specs)
       return $ Var new_id 
-replaceExprWithSpec lhs specs (App f x) = do
-  f' <- replaceExprWithSpec lhs specs f
-  x' <- replaceExprWithSpec lhs specs x
-  return $ App f' x'
-replaceExprWithSpec lhs specs (Lam b e) = do
-  e' <- replaceExprWithSpec lhs specs e
-  return $ Lam b e'
-replaceExprWithSpec lhs specs (Let b e) = do
-  b' <- replaceBindWithSpec lhs specs b
-  e' <- replaceExprWithSpec lhs specs e
-  return $ Let b' e'
+replaceExprWithSpec' _ _ x = return x
 
-replaceExprWithSpec lhs specs (Case e b t alts) = do
-  e' <- replaceExprWithSpec lhs specs e
-  alts' <- mapM (replaceAltsWithSpec lhs specs) alts
-  return $ Case e' b t alts'
-replaceExprWithSpec lhs specs (Cast e c) = do
-  e' <- replaceExprWithSpec lhs specs e
-  return $ Cast e' c
-replaceExprWithSpec lhs specs (Tick c e) = do
-  e' <- replaceExprWithSpec lhs specs e
-  return $ Tick c e'
-replaceExprWithSpec _ _ e = return e
-
-replaceAltsWithSpec :: Id -> [(Type, Id)] -> Alt Var -> CoreM (Alt Var)
-replaceAltsWithSpec lhs specs (Alt ac ls e) = do 
-  e' <- replaceExprWithSpec lhs specs e
-  return $ Alt ac ls e'
-  
-
-
+replaceWithSpecializations :: FullTransform CoreExpr b => Id -> [(Type, Id)] -> b -> CoreM b
+replaceWithSpecializations id' specs = fullTransformM (replaceExprWithSpec' id' specs)

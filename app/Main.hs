@@ -41,7 +41,7 @@ incNum a b c = floor a + b + c
 
 increase :: Float -> Company -> Company
 -- increase :: Data a => Float -> a -> a
-increase k = everywhere $ mkT (incS k)
+increase k = everywhere' $ mkT (incS k)
 
 -- anotherIncrease :: Data a => Float -> a -> a
 -- anotherIncrease k =

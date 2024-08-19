@@ -15,3 +15,4 @@ install _ todo = do
   -- For now, simpl, then remove sameTypeRep, then simpl and do again
   return $ [simpleInlinings, memoizedSpecialize] ++ todo ++ (specByPartialEvaluation : todo) -- ++ (specByPartialEvaluation : todo)
   -- return todo
+  -- return []
