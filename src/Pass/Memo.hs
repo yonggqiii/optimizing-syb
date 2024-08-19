@@ -946,7 +946,7 @@ mkTraversalLHS t = do
   uniq1 <- getUniqueM 
   uniq2 <- getUniqueM
   let name = mkInternalName uniq1 (mkLocalOcc uniq2 (mkVarOcc "traversal")) (UnhelpfulSpan UnhelpfulGenerated)
-  return $ mkExportedVanillaId name t
+  return $ mkLocalId name Many t
 
 createReplacedTraversal :: Id -> Type -> CoreExpr -> BoundVars -> CoreExpr
 createReplacedTraversal traversal_name type_arg dict_arg = aux base_expr
