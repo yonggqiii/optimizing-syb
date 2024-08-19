@@ -5,12 +5,10 @@ import Engines.Substitution(substitute)
 import Engines.LetInline(letInline)
 import Engines.BetaReduction
 import GHC.Plugins
-import Control.Applicative
 import Control.Monad
 import Data.Maybe 
 import GHC.Core.Map.Type
 import Engines.DropCasts (DropCasts(dropCasts))
-import GHC.IO (unsafePerformIO)
 import Engines.LeftElaboration
 import Engines.Transform
 import Engines.InlineUnfolding (inlineId)
@@ -70,23 +68,17 @@ memoizedSpecialize = CoreDoPluginPass "Memoizing Specialization" memoSpecModGuts
 -- | Performs memoizing specialization on the 'ModGuts' of the program
 memoSpecModGuts :: CorePluginPass
 memoSpecModGuts mod_guts = do
-  putMsgS "== Phase: Memoizing Specialization =="
-  let all_binds    :: [CoreBind]  = mg_binds mod_guts
-      function_map :: FunctionMap = initFunctionMap all_binds
-  -- showAllNames all_binds 
+  putMsgS "Running phase: Memoizing Specialization"
+  let all_binds    = mg_binds mod_guts
+      function_map = initFunctionMap all_binds
   TER { ter_program = traversal_extracted_program
       , ter_traversal_specs = spec_map
       , ter_traversal_ids = traversal_ids
       }                                           <- extractTraversals all_binds function_map
-  -- prt traversal_extracted_program
-  -- prt function_map
-  -- return mod_guts
   new_program <- goElim traversal_extracted_program traversal_ids
-  -- prt new_program
   let swls = map initSpecializationWorkList spec_map
   (swls', new_program') <- specTraversals swls new_program
   final_pgm <- replaceProgramWithSpecializations new_program' swls'
-  -- prt final_pgm
   let new_mod_guts = mod_guts { mg_binds = final_pgm }
   return new_mod_guts
 
@@ -126,6 +118,7 @@ memoSpecModGuts mod_guts = do
  -    3.  In a list of [fn_names], at least one fn_name has a specialization 
  -        of the traversal. -}
 
+type FunctionMap = [(Id, [Id])]
 -- | Initializes the 'FunctionMap' from the program that contains all map entries such that 
 --    1.  all RHS functions are equivalent in implementation to
 --        the bind location on the LHS
@@ -141,134 +134,59 @@ initFunctionMap pgm = let specialize_groups           = groupSpecializedFunction
                           -- remove uninteresting specialization groups
                           interesting_specializations = filterSpecializationGroupsWithNoSpecializableTraversal specialize_groups pgm
                           -- result is just the combination of everything interesting
-                      in  seq (unsafePerformIO (putStrLn (showSDocUnsafe (ppr specialize_groups)))) $
-                            seq (unsafePerformIO (putStrLn (showSDocUnsafe (ppr interesting_fns)))) $
-                            seq (unsafePerformIO (putStrLn (showSDocUnsafe (ppr interesting_specializations)))) $
-                            interesting_fns ++ interesting_specializations
+                      in  interesting_fns ++ interesting_specializations
 
--- -- | A 'BindLocation' describes the location of a 'CoreBind' within a 
--- -- 'CoreProgram'
--- data BindLocation = TopLevelLocation -- ^ The location of a non-recursive 'CoreBind' or a recursive group
---                       Int -- ^ The index of the 'CoreProgram' this top-level find occurs in
---                   | RecLocation -- ^ The location of a bind within a recursive group
---                       Int -- ^ The index of the 'CoreProgram' the recursive group is located
---                       Int -- ^ The index of the bind pair within the recursive group
---   deriving (Show, Eq)
-
-type FunctionMap = [(Id, [Id])]
 
 -- | Gets all binds in a program that contain a specialize rule. It produces a 'FunctionMap'
--- loc -> [locs] such that the LHS location is a bind with rules, and the RHS list of 
--- locations are the specialized versions of the LHS.
+-- id -> [id] such that the LHS id is a bind with rules, and the RHS list of 
+-- ids are the specialized versions of the LHS.
 groupSpecializedFunctions :: [CoreBind] -- ^ The list of binds in the program
                           -> FunctionMap -- ^ The list of functions with specialization rules
-groupSpecializedFunctions pgm = aux pgm
-        -- 'aux' traverses the program, finding specialization groups
-  where aux :: [CoreBind] -> FunctionMap
-        -- boring
-        aux [] = []
-        -- non recursive binding case
-        aux ((NonRec name _) : xs) = 
-              -- look for specializations in this binding
-          let potential_map_entry = bux name
-              -- recursively search the rest of the program
-              r = aux xs
-          in case potential_map_entry of
-                -- something came up in this binding
-                Just map_entry -> map_entry : r
-                -- nothing came up, just give recursive result
-                Nothing -> r
-        -- recursive group case
-        aux (Rec ls : xs) =
-              -- get all the names in the recursive group
-          let names_in_rec_group = map fst ls
-              -- look through each binding in the recursive group
-              potential_map_entries = map bux names_in_rec_group
-              -- obtain only the entries
-              map_entries = collectNonMaybes potential_map_entries
-              -- get the recursive result for the rest of the program
-              r = aux xs
-              -- collect them together
-          in  map_entries ++ r
-
-        -- bux looks for a recursive group in a single variable
-        bux :: Var -> Maybe (Id, [Id])
-        bux v = do
-              -- get all the rules in this bind
-          let all_rules_of_bind = idCoreRules v
-              -- only get the specialize (SPEC) rules in this bind
-              spec_rules_of_bind = filter (isRuleNameSpec . ru_name) all_rules_of_bind
-          if null spec_rules_of_bind then
-            -- no specialize rules, don't bother
-            Nothing
-          else do
-                -- get the RHS expressions from the rules
-            let rhs_of_spec_rules  = map ru_rhs spec_rules_of_bind
-                -- get those expressions as vars
-                rhs_as_vars        = getVarsFromExpressions rhs_of_spec_rules
-            return (v, v : rhs_as_vars)
-            --     -- get the vars as bind locations
-            --     rhs_as_bind_locs   = collectNonMaybes $ map (lookupBindName pgm) rhs_as_vars
-            --     -- get the LHS var as a bind location
-            --     lhs_bind_loc  = lookupBindNameForSure pgm v
-            --     -- create the map entry; RHS contains itself
-            --     map_entry          = (lhs_bind_loc, lhs_bind_loc : rhs_as_bind_locs)
-            -- return map_entry
+groupSpecializedFunctions [] = []
+groupSpecializedFunctions (x : xs) = let names                 = bindersOf x
+                                         potential_map_entries = map getSpecializeGroupFromId names
+                                         map_entries           = collectNonMaybes potential_map_entries
+                                         rec_res               = groupSpecializedFunctions xs
+                                     in  map_entries ++ rec_res
+  where getSpecializeGroupFromId :: Var -> Maybe (Id, [Id])
+        getSpecializeGroupFromId v 
+          = do let all_rules_of_bind = idCoreRules v
+                   spec_rules_of_bind = filter (isRuleNameSpec . ru_name) all_rules_of_bind
+               if null spec_rules_of_bind
+               then Nothing
+               else do let rhs_of_spec_rules = map ru_rhs spec_rules_of_bind
+                           rhs_as_vars = getSpecializedIDsFromSpecExpression rhs_of_spec_rules
+                       return (v, v : rhs_as_vars) -- specialization group includes itself
+        getSpecializedIDsFromSpecExpression :: [Expr Var] -> [Var]
+        getSpecializedIDsFromSpecExpression [] = []
+        getSpecializedIDsFromSpecExpression (App f _ : xs') = getSpecializedIDsFromSpecExpression (f : xs')
+        getSpecializedIDsFromSpecExpression (Var v : xs') = v : getSpecializedIDsFromSpecExpression xs'
+        getSpecializedIDsFromSpecExpression (_ : xs') = getSpecializedIDsFromSpecExpression xs'
+        isRuleNameSpec :: RuleName -> Bool
+        isRuleNameSpec name = let name_string = show name
+                                  header      = drop 1 $ take 5 name_string
+                              in  "SPEC" == header
+        collectNonMaybes :: [Maybe a] -> [a]
+        collectNonMaybes [] = []
+        collectNonMaybes (Just x' : xs') = x' : collectNonMaybes xs'
+        collectNonMaybes (_ : xs') = collectNonMaybes xs'
 
 -- | Produces a 'FunctionMap' containing the binds that contain the target expression.
 bindsWithTargetExpr :: FunctionMap  -- ^ The current map so that duplicates are not added
                     -> [CoreBind]   -- ^ The bind to search
                     -> FunctionMap  -- ^ The a separate 'FunctionMap' containing binds of interest, 
                                     -- excluding those that are specialized
-bindsWithTargetExpr mp pgm = aux pgm
-        -- aux traverses the program and actually searches for binds that contain the
-        -- target expression
-  where aux :: [CoreBind] -> FunctionMap 
-        -- base case is uninteresting
-        aux [] = []
-        -- Non-recursive bind case
-        aux (NonRec b e : xs) 
-            -- If the bind b is already part of the existing 'FunctionMap', don't bother
-            | b `elemAnywhere` mp = rec_res
-            -- If the RHS contains the target expression, add that to the resulting 'FunctionMap'
-            | containsTargetExpr e    = (b, [b]) : rec_res
-            -- If none of the above, don't bother with this entry either
-            | otherwise               = rec_res
-                
-          where -- 'rec_res' is the recursive result of 'aux' applied to the remainder of the
-                -- program, 'xs'
-                rec_res = aux xs
-        -- Recursive group: search for binds among the group with the target expression, and the 
-        -- binds in the remainder of the program, and add them together
-        aux (Rec ls : xs) = bux ls ++ aux xs
-
-        -- 'bux' traverses a list of bind pairs and searches for binds in that list that 
-        -- contain the target expression
-        bux :: [(Var, Expr Var)] -> FunctionMap
-        -- base case is uninteresting
+bindsWithTargetExpr mp pgm
+    = let flattened_binds = flattenBinds pgm
+      in  bux flattened_binds 
+  where bux :: [(Id, CoreExpr)] -> FunctionMap
         bux [] = []
-        -- traverse the list of binds in the recursive group
-        bux ((b, e) : bs)
-            | b `elemAnywhere` mp = rec_res
-            | containsTargetExpr e    = (b, [b]) : rec_res
-            | otherwise               = rec_res
-          where rec_res = bux bs
-
+        bux ((lhs, rhs) : xs)
+          | lhs `elemAnywhere` mp = r
+          | containsTargetExpr rhs = (lhs, [lhs]) : r
+          | otherwise = r
+          where r = bux xs
         
-{- As it turns out, the target expression looks something like 
- - $ @LiftedRep @(forall a. Data a => a -> a) @(forall a. Data a => a -> a) everywhere (mkT ...) ... 
- - Thus in determining whether a bind is relevant, we should just look for every single identifier 
- - and look for the 'everywhere' function.
- - Furthermore, we cannot rely on the name stable string entirely, because 
- - it includes the hash of the library, possibly determining versions.
- - As such, because it looks something like syb.....$everywhere, that is what we should check for.
- -
- - Also, it is not the case that the target expression looks like the above. It could actually 
- - be in the form of everywhere (mkT ...) ... 
- -
- - We will probably need a more sophisticated form of expression checking that handles these two cases.
- - -}
-
 -- | Ensures that every specialization group has at least one specializable traversal.
 filterSpecializationGroupsWithNoSpecializableTraversal :: FunctionMap -> [CoreBind] -> FunctionMap
 filterSpecializationGroupsWithNoSpecializableTraversal [] _ = []
@@ -278,22 +196,20 @@ filterSpecializationGroupsWithNoSpecializableTraversal ((loc, ls_locs) : xs) pgm
   where aux :: Id -> Bool
         aux lhs = let e = lookupTopLevelRHS lhs pgm
                   in  containsTargetExpr e
-                  --     res = do e <- lookupTopLevelRHS lhs pgm
-                  --              guard $ containsTargetExpr e
-                  -- in  isJust res
         rec_res :: FunctionMap
         rec_res = filterSpecializationGroupsWithNoSpecializableTraversal xs pgm
 
 -- | Determines if an expression contains the expression of interest, 
--- i.e. 'everywhere f' for some 'f'
+-- e.g. 'everywhere f' or 'everything f q' for some 'f' and 'q'
 containsTargetExpr :: Expr Var -> Bool
--- case of everywhere f @Type $dict
-containsTargetExpr (Everywhere combinator transformation arg_to_combinator dict_arg)
-  | isVarEverywhere combinator && isTypeFullyConcrete arg_to_combinator = True
-  -- | otherwise                                                           = containsTargetExpr transformation || containsTargetExpr dict_arg
-containsTargetExpr (Everything scheme type_arg_to_scheme combiner query t d)
+-- case of everywhere f @t $dt
+containsTargetExpr (Everywhere scheme _ type_arg _)
+  | isVarEverywhere scheme && isTypeFullyConcrete type_arg = True
+-- case of everything @r f q @t $td
+containsTargetExpr (Everything scheme _ _ _ t _)
   | isVarEverything scheme && isTypeFullyConcrete t = True
-containsTargetExpr (EverywhereM scheme monad_type monad_dict transformation t d)
+-- case of everywhereM @m $dm f @t $td
+containsTargetExpr (EverywhereM scheme _ _ _ t _)
   | isVarEverywhereM scheme && isTypeFullyConcrete t = True
 containsTargetExpr (App f arg)           = containsTargetExpr f || containsTargetExpr arg
 containsTargetExpr (Var _)               = False
@@ -302,10 +218,8 @@ containsTargetExpr (Lam _ e)             = containsTargetExpr e
 containsTargetExpr (Let (NonRec _ e') e) = containsTargetExpr e' || containsTargetExpr e
 containsTargetExpr (Let (Rec ls) e)      = let es = map snd ls
                                            in any containsTargetExpr (e : es)
-containsTargetExpr (Case e _ _ alts)     = let alt_exprs = map aux alts 
+containsTargetExpr (Case e _ _ alts)     = let alt_exprs = rhssOfAlts alts 
                                            in any containsTargetExpr (e : alt_exprs)
-  where aux :: Alt b -> Expr b 
-        aux (Alt _ _ e') = e'
 containsTargetExpr (Cast e _)            = containsTargetExpr e
 containsTargetExpr (Tick _ e)            = containsTargetExpr e
 containsTargetExpr (Type _)              = False
@@ -318,46 +232,30 @@ pushEntryToMapOfList k v ((lhs, rhs) : entries)
   | otherwise = (lhs, rhs) : pushEntryToMapOfList k v entries
 
 
-isRuleNameSpec :: RuleName -> Bool
-isRuleNameSpec name = let name_string = show name
-                          header      = drop 1 $ take 5 name_string
-                      in  "SPEC" == header
-
-getVarsFromExpressions :: [Expr Var] -> [Var]
-getVarsFromExpressions [] = []
-getVarsFromExpressions (App f x : xs) = getVarsFromExpressions (f : xs)
-getVarsFromExpressions (Var v : xs) = v : getVarsFromExpressions xs
-getVarsFromExpressions (_ : xs) = getVarsFromExpressions xs
-
-collectNonMaybes :: [Maybe a] -> [a]
-collectNonMaybes [] = []
-collectNonMaybes (Just x : xs) = x : collectNonMaybes xs
-collectNonMaybes (_ : xs) = collectNonMaybes xs
-
 elemAnywhere :: Id -> FunctionMap -> Bool
 elemAnywhere _ [] = False
 elemAnywhere loc ((k, v) : xs) = 
   loc == k || loc `elem` v || loc `elemAnywhere` xs 
 
-lookupTopLevelRHS_maybe :: Id -> [CoreBind] -> Maybe CoreExpr
-lookupTopLevelRHS_maybe _ [] = Nothing
-lookupTopLevelRHS_maybe id' (NonRec lhs rhs : bs)
-  | id' == lhs = Just rhs
-  | otherwise = lookupTopLevelRHS_maybe id' bs
-lookupTopLevelRHS_maybe id' (Rec ls : bs) =
-    case aux ls of 
-      Nothing -> lookupTopLevelRHS_maybe id' bs
-      x -> x
-  where aux :: [(Id, CoreExpr)] -> Maybe CoreExpr
+lookupTopLevelRHS :: Id -> [CoreBind] -> CoreExpr
+lookupTopLevelRHS id' pgm 
+    = case lookupTopLevelRHS_maybe pgm of
+        Just x -> x
+        Nothing -> panic "the impossible happened... cannot find RHS of bind"
+  where lookupTopLevelRHS_maybe :: [CoreBind] -> Maybe CoreExpr
+        lookupTopLevelRHS_maybe  [] = Nothing
+        lookupTopLevelRHS_maybe (NonRec lhs rhs : bs)
+          | id' == lhs = Just rhs
+          | otherwise = lookupTopLevelRHS_maybe bs
+        lookupTopLevelRHS_maybe (Rec ls : bs) =
+            case aux ls of 
+              Nothing -> lookupTopLevelRHS_maybe bs
+              x -> x
+        aux :: [(Id, CoreExpr)] -> Maybe CoreExpr
         aux [] = Nothing
         aux ((lhs, rhs) : rs)
           | id' == lhs = Just rhs
           | otherwise = aux rs
-
-lookupTopLevelRHS :: Id -> [CoreBind] -> CoreExpr
-lookupTopLevelRHS id' pgm = case lookupTopLevelRHS_maybe id' pgm of
-  Just x -> x
-  Nothing -> panic "the impossible happened... cannot find RHS of bind"
 
 -- | This function determines if a 'Var' is the 'everywhere' function.
 isVarEverywhere :: Var -> Bool
@@ -375,25 +273,21 @@ isVarEverything v = let name = varName v
                         post = last' (length "$everything") s
                     in  pre == "$syb" && post == "$everything"
 
--- | This function determines if a 'Var' is the 'everything' function.
+-- | This function determines if a 'Var' is the 'everywhereM' function.
 isVarEverywhereM :: Var -> Bool
 isVarEverywhereM v = let name = varName v
                          s    = nameStableString name
                          pre  = take 4 s
                          post = last' (length "$everywhereM") s
                      in  pre == "$syb" && post == "$everywhereM"
--- | Determines if a 'Var' is the '($)' function
-isVarDollar :: Var -> Bool
-isVarDollar v = let name = varName v
-                    s    = nameStableString name
-                in  s == "$base$GHC.Base$$"
+
 -- | Drops all the elements in a list except the last few elements.
 last' :: Int -> [a] -> [a]
 last' x ls | length ls <= x = ls
            | otherwise      = last' x (tail ls)
 
 dropLast :: Int -> [a] -> [a]
-dropLast n [] = []
+dropLast _ [] = []
 dropLast n ls@(x : xs)
   | n >= length ls = []
   | otherwise      = x : dropLast n xs
@@ -1158,7 +1052,7 @@ goElimTraversal lhs rhs = do
   let traversal_structure = destructureTraversal rhs []
   let scheme = ts_scheme traversal_structure
   let everywhere_unfolding = unfoldingTemplate $ realIdUnfolding scheme
-  prt everywhere_unfolding
+  -- prt everywhere_unfolding
   let inlined_unfolding = letInline everywhere_unfolding
   go_replacement <- mkGoReplacement lhs traversal_structure
   let unfolding_with_replaced_go = pushGoReplacementIntoInlinedUnfolding inlined_unfolding go_replacement
@@ -1370,12 +1264,12 @@ gmapTEliminator (App (App (Var v) (Type t)) d)
     = do
           let uf = unfoldingTemplate $ realIdUnfolding v
           d' <- leftInlineLikeCrazy d
-          --putMsgS%%%"DICTIONARY"
-          --prt%%%d'
-          --putMsgS%%%"BETA REDUCING"
+          putMsgS "DICTIONARY"
+          prt d'
+          putMsgS "BETA REDUCING"
           -- let x = betaReduceCompletely' (App (App uf (Type t)) d') deBruijnize
           x <- betaReduceCompletelyM (App (App uf (Type t)) d')
-          --prt%%%x
+          prt x
           --putMsgS%%%"CASE OF KNOWN CASE"
           let x' = caseOfKnownCase x
           --prt%%%x'
