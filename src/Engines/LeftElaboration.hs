@@ -18,4 +18,6 @@ leftElaboration extractor elaboration post_process (Lam b e) = do e' <- leftElab
                                                                   return $ post_process $ Lam b e'
 leftElaboration extractor elaboration post_process (App f x) = do f' <- leftElaboration extractor elaboration post_process f
                                                                   return $ post_process $ App f' x
+leftElaboration extractor elaboration post_process (Cast e c) = do e' <- leftElaboration extractor elaboration post_process e
+                                                                   return $ post_process $ Cast e' c
 leftElaboration _ _ post_process x = return $ post_process x

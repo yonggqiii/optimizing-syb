@@ -6,14 +6,70 @@ import GHC.IO (unsafePerformIO)
 import Engines.Transform
 import GHC.Core.Map.Type
 
-betaReducerM :: Monad m => CoreExpr -> m CoreExpr
+betaReducerM :: CoreExpr -> CoreM CoreExpr
 betaReducerM (App (Lam var rhs) x) = return $ substitute var x rhs
+betaReducerM (App (Cast (Lam var rhs) c) (Type x)) = do
+  -- putMsgS "BR on COERCION"
+  -- putMsg $ ppr (App (Cast (Lam var rhs) c) (Type x))
+  -- putMsgS "COERCION"
+  -- putMsg $ ppr  c
+  -- putMsgS "COERCION TYPE"
+  -- putMsg $ ppr  $ coercionType c
+  -- putMsgS "COERCION KIND"
+  -- putMsg $ ppr $ coercionKind c
+  -- putMsgS "splitForAllCo_maybe"
+  let Just (tv, e, f) = splitForAllCo_ty_maybe c
+  -- putMsgS "TYVAR"
+  -- putMsg $ ppr tv
+  -- putMsgS "e COERCION"
+  -- putMsg $ ppr e
+  -- putMsgS "e COERCION TYPE"
+  -- putMsg $ ppr $ coercionType e
+  -- putMsgS "e COERCION KIND"
+  -- putMsg $ ppr $ coercionKind e
+  --
+  -- putMsgS "f coercion"
+  -- putMsg $ ppr f
+  -- putMsgS "f COERCION TYPE"
+  -- putMsg $ ppr $ coercionType f
+  -- putMsgS "f COERCION KIND"
+  -- putMsg $ ppr $ coercionKind f
+  let newFCoercion = substitute tv x f
+  -- putMsgS "SUBSTITUTED COERCION"
+  -- putMsg $ ppr $ newFCoercion
+  -- putMsgS " ============================== "
+  let newTerm = substitute var x rhs
+  -- putMsgS "NEW TERM"
+  -- putMsg $ ppr $ newTerm
+  -- putMsgS " ============================== "
+  -- putMsgS "NEW CAST"
+  let newCast = Cast newTerm newFCoercion
+  -- putMsg $ ppr $ newCast
+  return newCast
+betaReducerM (App (Cast (Lam var rhs) c) x) = do
+  putMsgS "BR on COERCION"
+  putMsg $ ppr (App (Cast (Lam var rhs) c) x)
+  putMsgS "COERCION"
+  putMsg $ ppr  c
+  putMsgS "COERCION TYPE"
+  putMsg $ ppr  $ coercionType c
+  putMsgS "COERCION KIND"
+  putMsg $ ppr $ coercionKind c
+  putMsgS "SPLIT FUNCO"
+  let Just (e, f) = splitFunCo_maybe c
+  putMsgS "E COERCION"
+  putMsg $ ppr $ e
+  putMsgS "F COERCION"
+  putMsg $ ppr $ f
+  let newTerm = substitute var x rhs
+  return $ Cast newTerm f
+  -- return $ App (Cast (Lam var rhs) c) x
 betaReducerM x = return x
 
-betaReduceM :: (FullTransform CoreExpr a, Monad m) => a -> m a
+betaReduceM :: (FullTransform CoreExpr a) => a -> CoreM a
 betaReduceM = fullTransformM betaReducerM
 
-betaReduceCompletelyM :: (Eq (DeBruijn a), FullTransform CoreExpr a, Monad m) => a -> m a
+betaReduceCompletelyM :: (Eq (DeBruijn a), FullTransform CoreExpr a) => a -> CoreM a
 betaReduceCompletelyM = fullTransformMTillFixedPoint deBruijnize betaReducerM
 
 betaReducer :: CoreExpr -> CoreExpr

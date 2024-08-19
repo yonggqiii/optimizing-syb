@@ -32,16 +32,22 @@ import Data.Generics
 --   deriving (Typeable, Show, Data)
 --
 --
-incS :: Float -> Salary -> Salary
-incS k (S s) = S (s * (1 + k))
+-- incS :: Float -> Salary -> Salary
+-- incS k (S s) = S (s * (1 + k))
+--
+-- incNum :: Float -> Int -> Int -> Int
+-- incNum a b c = floor a + b + c
 
-incNum :: Float -> Int -> Int -> Int
-incNum a b c = floor a + b + c
 
-
-increase :: Float -> Company -> Company
+-- increase :: Float -> Company -> Company
 -- increase :: Data a => Float -> a -> a
-increase k = everywhere' $ mkT (incS k)
+-- increase k = everywhere' $ mkT (incS k)
+
+getS :: Salary -> Float
+getS (S s) = s
+
+totalSalary :: Company -> Float
+totalSalary = everything (+) $ mkQ 0 getS
 
 -- anotherIncrease :: Data a => Float -> a -> a
 -- anotherIncrease k =
@@ -54,6 +60,7 @@ increase k = everywhere' $ mkT (incS k)
 -- {-# SPECIALIZE increase :: Float -> [Dept] -> [Dept] #-}
 -- {-# SPECIALIZE increase :: Float -> Employee -> Employee #-}
 -- {-# SPECIALIZE increase :: Data a => Float -> [a] -> [a] #-}
+-- {-# SPECIALIZE totalSalary :: Company -> Float #-}
  
 -- add' :: Num a => a -> a -> a
 -- add' x y = x + y
@@ -79,6 +86,7 @@ main = do
   let c = C [d1, d2]
   -- let c = Cons d1 (Cons d2 EmptyList)
   print c
-  let d = increase 0.1 c
-  print d
+  -- let d = increase 0.1 c
+  -- print d
+  print $ totalSalary c
   return ()

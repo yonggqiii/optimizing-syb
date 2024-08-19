@@ -73,16 +73,20 @@ memoSpecModGuts mod_guts = do
   putMsgS "== Phase: Memoizing Specialization =="
   let all_binds    :: [CoreBind]  = mg_binds mod_guts
       function_map :: FunctionMap = initFunctionMap all_binds
-  showAllNames all_binds 
+  -- showAllNames all_binds 
   TER { ter_program = traversal_extracted_program
       , ter_traversal_specs = spec_map
       , ter_traversal_ids = traversal_ids
       }                                           <- extractTraversals all_binds function_map
+  -- prt traversal_extracted_program
+  -- prt function_map
+  -- return mod_guts
   new_program <- goElim traversal_extracted_program traversal_ids
   -- prt new_program
   let swls = map initSpecializationWorkList spec_map
   (swls', new_program') <- specTraversals swls new_program
   final_pgm <- replaceProgramWithSpecializations new_program' swls'
+  -- prt final_pgm
   let new_mod_guts = mod_guts { mg_binds = final_pgm }
   return new_mod_guts
 
@@ -137,7 +141,10 @@ initFunctionMap pgm = let specialize_groups           = groupSpecializedFunction
                           -- remove uninteresting specialization groups
                           interesting_specializations = filterSpecializationGroupsWithNoSpecializableTraversal specialize_groups pgm
                           -- result is just the combination of everything interesting
-                      in  interesting_fns ++ interesting_specializations
+                      in  seq (unsafePerformIO (putStrLn (showSDocUnsafe (ppr specialize_groups)))) $
+                            seq (unsafePerformIO (putStrLn (showSDocUnsafe (ppr interesting_fns)))) $
+                            seq (unsafePerformIO (putStrLn (showSDocUnsafe (ppr interesting_specializations)))) $
+                            interesting_fns ++ interesting_specializations
 
 -- -- | A 'BindLocation' describes the location of a 'CoreBind' within a 
 -- -- 'CoreProgram'
@@ -283,7 +290,9 @@ containsTargetExpr :: Expr Var -> Bool
 -- case of everywhere f @Type $dict
 containsTargetExpr (Everywhere combinator transformation arg_to_combinator dict_arg)
   | isVarEverywhere combinator && isTypeFullyConcrete arg_to_combinator = True
-  | otherwise                                                           = containsTargetExpr transformation || containsTargetExpr dict_arg
+  -- | otherwise                                                           = containsTargetExpr transformation || containsTargetExpr dict_arg
+containsTargetExpr (Everything scheme type_arg_to_scheme combiner query t d)
+  | isVarEverything scheme && isTypeFullyConcrete t = True
 containsTargetExpr (App f arg)           = containsTargetExpr f || containsTargetExpr arg
 containsTargetExpr (Var _)               = False
 containsTargetExpr (Lit _)               = False
@@ -314,6 +323,7 @@ isRuleNameSpec name = let name_string = show name
 
 getVarsFromExpressions :: [Expr Var] -> [Var]
 getVarsFromExpressions [] = []
+getVarsFromExpressions (App f x : xs) = getVarsFromExpressions (f : xs)
 getVarsFromExpressions (Var v : xs) = v : getVarsFromExpressions xs
 getVarsFromExpressions (_ : xs) = getVarsFromExpressions xs
 
@@ -354,6 +364,14 @@ isVarEverywhere v = let name = varName v
                         pre  = take 4 s
                         post = last' (length "$everywhere") s
                     in  pre == "$syb" && (post == "$everywhere" || post == "everywhere'")
+
+-- | This function determines if a 'Var' is the 'everything' function.
+isVarEverything :: Var -> Bool
+isVarEverything v = let name = varName v
+                        s    = nameStableString name
+                        pre  = take 4 s
+                        post = last' (length "$everything") s
+                    in  pre == "$syb" && post == "$everything"
 
 -- | Determines if a 'Var' is the '($)' function
 isVarDollar :: Var -> Bool
@@ -507,6 +525,9 @@ extractTraversals program' (fn_map_entry : fn_map) = do
 pattern Everywhere :: Var -> CoreExpr -> Type -> CoreExpr -> CoreExpr
 pattern Everywhere e f t d <- (App (App (App (Var e) f) (Type t)) d)
 
+pattern Everything :: Var -> Type -> CoreExpr -> CoreExpr -> Type -> CoreExpr -> CoreExpr
+pattern Everything e t c q qt qd <- App (App (App (App (App (Var e) (Type t)) c) q) (Type qt)) qd
+
 -- | Extracts all traversals from an expression. 
 extractTraversalsFromExpression :: CoreExpr -> BoundVars -> CoreM TEExprR
 {- Important case -}
@@ -545,6 +566,57 @@ extractTraversalsFromExpression (Everywhere combinator transformation arg_to_com
           prt dictionary_arg_to_combinator
           return spec1 
         
+      -- putMsg $ ppr new_bind_for_traversal
+      -- putMsg $ ppr replaced_expr
+      return TEER { teer_result_expr        = replaced_expr
+                  , teer_spec_map           = new_spec
+                  , teer_subst_map          = template_entry : subst1
+                  , teer_new_binds          = new_bind_for_traversal : core_binds1
+                  , teer_new_traversal_ids  = traversal_lhs : new_traversal_ids}
+extractTraversalsFromExpression (Everything s tr c q t d) bound_vars
+  | isVarEverything s = do
+      rec_result1 <- extractTraversalsFromExpression c bound_vars
+      rec_result2 <- extractTraversalsFromExpression q bound_vars
+      let real_c = teer_result_expr rec_result1
+          real_q  = teer_result_expr rec_result2
+          spec1   = teer_spec_map rec_result1 ++ teer_spec_map rec_result2
+          subst1  = teer_subst_map rec_result1 ++ teer_subst_map rec_result2
+          core_binds1 = teer_new_binds rec_result1 ++ teer_new_binds rec_result2
+          new_traversal_ids = teer_new_traversal_ids rec_result1 ++ teer_new_traversal_ids rec_result2
+      -- -- perform extraction on any other relevant expression
+      -- rec_result <- extractTraversalsFromExpression transformation bound_vars 
+      -- let real_transformation = teer_result_expr rec_result
+      --     spec1               = teer_spec_map rec_result
+      --     subst1              = teer_subst_map rec_result
+      --     core_binds1         = teer_new_binds rec_result
+      --     new_traversal_ids   = teer_new_traversal_ids rec_result
+      let target_expr = App (App (App (Var s) (Type tr)) real_c) real_q
+      -- let target_expr = App (Var combinator) real_transformation
+      -- obtain the bound variables of this expression
+      let bound_vars_of_expression = getOccurringVariables target_expr bound_vars
+      let type_of_target_expr = exprType target_expr
+      let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
+      -- create the RHS
+      (traversal_rhs, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
+      -- prt $ exprType traversal_rhs
+      traversal_lhs <- mkTraversalLHS type_of_traversal
+      let new_bind_for_traversal = Rec [(traversal_lhs, traversal_rhs)]
+      -- create the replaced traversal
+      let replaced_expr = createReplacedTraversal traversal_lhs t d bound_vars_of_expression
+      let template_entry = (template_left, traversal_lhs)
+      -- check if specializable
+      new_spec <- 
+        if isTypeFullyConcrete t && null (getOccurringVariables d bound_vars) then do
+          putMsgS " ==== PUSH ==== "
+          prt t
+          prt d
+          return $ pushEntryToMapOfList traversal_lhs (t, d) spec1
+        else do
+          putMsgS " ==== NO PUSH ==== "
+          prt t
+          prt d
+          return spec1 
+      -- prt new_bind_for_traversal
       -- putMsg $ ppr new_bind_for_traversal
       -- putMsg $ ppr replaced_expr
       return TEER { teer_result_expr        = replaced_expr
@@ -684,8 +756,13 @@ createTraversalFunctionType target_expr_type bound_vars =
     in full_type
   where aux :: Type -> [Var] -> Type
         aux acc [] = acc
-        aux acc (v : vs) = let fn_type = mkVisFunTy Many (exprType (Var v)) acc
-                           in  aux fn_type vs
+        aux acc (v : vs)
+          | isTyVar v = let fn_type = mkSpecForAllTy v acc
+                        in  aux fn_type vs
+          | otherwise = let fn_type = mkVisFunTy Many (exprType (Var v)) acc
+                        in aux fn_type vs
+        -- aux acc (v : vs) = let fn_type = mkVisFunTy Many (exprType (Var v)) acc
+        --                    in  aux fn_type vs
 
 
 performSubstitution :: Expr Var -> (Expr Var, Var) -> CoreM (Maybe Var)
@@ -727,6 +804,31 @@ pushTraversalsIntoExpression (App (App (App (Var combinator) transformation) (Ty
           in return (replacement, new_spec)
               
         Nothing -> let actual_expr = App (App (App (Var combinator) real_transformation) (Type arg_to_combinator)) dictionary_arg_to_combinator
+                   in return (actual_expr, spec1)
+-- pushTraversalsIntoExpression (App (App (App (Var combinator) transformation) (Type arg_to_combinator)) dictionary_arg_to_combinator) subst_map bound_vars
+pushTraversalsIntoExpression (Everything combinator tr c q t d) subst_map bound_vars
+  | isVarEverything combinator = do
+      -- perform push on any other relevant expression
+      (real_c, spec_c) <- pushTraversalsIntoExpression c subst_map bound_vars
+      (real_q, spec_q) <- pushTraversalsIntoExpression q subst_map bound_vars
+      let spec1 = spec_c ++ spec_q
+      let target_expr = App (App (App (Var combinator) (Type tr)) real_c) real_q
+      -- (real_transformation, spec1) <- pushTraversalsIntoExpression transformation subst_map bound_vars
+      -- let target_expr = App (Var combinator) real_transformation
+      let bound_vars_of_expression = getOccurringVariables target_expr bound_vars
+      let type_of_target_expr = exprType target_expr
+      let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
+      (_, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
+      -- prt template_left
+      mTraversal <- tryAllSubstitutions template_left subst_map
+      case mTraversal of 
+        Just traversal ->
+          -- create the new expression
+          let replacement = createReplacedTraversal traversal t d bound_vars_of_expression
+              new_spec = if isTypeFullyConcrete t && null (getOccurringVariables d bound_vars) then pushEntryToMapOfList traversal (t, d) spec1 else spec1
+          in return (replacement, new_spec)
+              
+        Nothing -> let actual_expr = App (App (target_expr) (Type t)) d
                    in return (actual_expr, spec1)
 pushTraversalsIntoExpression (Var i) _ _ = return (Var i, [])
 pushTraversalsIntoExpression (Lit l) _ _ = return (Lit l, [])
@@ -851,29 +953,56 @@ createReplacedTraversal traversal_name type_arg dict_arg = aux base_expr
   where base_expr :: Expr Var 
         base_expr = App (App (Var traversal_name) (Type type_arg)) dict_arg
         aux e [] = e
-        aux e (b : bs) = let e' = aux e bs
-                         in  App e' (Var b)
+        aux e (b : bs)
+          | isTyVar b = let e' = aux e bs in App e' (Type $ mkTyVarTy b)
+          | otherwise = let e' = aux e bs in App e' (Var b)
+        -- aux e (b : bs) = let e' = aux e bs
+        --                  in  App e' (Var b)
 
+orderPreservingUnion :: Eq a => [a] -> [a] -> [a]
+orderPreservingUnion x [] = x
+orderPreservingUnion [] x = x
+orderPreservingUnion (x : xs) ys = if x `notElem` ys
+                                   then x : (xs `orderPreservingUnion` ys)
+                                   else xs `orderPreservingUnion` ys
+
+orderPreservingIntersection :: Eq a => [a] -> [a] -> [a]
+orderPreservingIntersection _ [] = []
+orderPreservingIntersection x (y : ys) = if y `elem` x
+                                         then y : (x `orderPreservingIntersection` ys)
+                                         else x `orderPreservingIntersection` ys
+                                        
 
 getOccurringVariables :: Expr Var -> [Var] -> [Var]
 getOccurringVariables (Var v) bvs = filter ( == v) bvs
 getOccurringVariables (Lit _) _ = []
-getOccurringVariables (App f x) bvs = getOccurringVariables f bvs ++ getOccurringVariables x bvs
+getOccurringVariables (App f x) bvs = (getOccurringVariables f bvs ++ getOccurringVariables x bvs) `orderPreservingIntersection` bvs
 getOccurringVariables (Lam _ e) bvs = getOccurringVariables e bvs
-getOccurringVariables (Let b e) bvs = aux b ++ getOccurringVariables e bvs
+getOccurringVariables (Let b e) bvs = (aux b ++ getOccurringVariables e bvs) `orderPreservingIntersection` bvs
   where aux :: Bind Var -> [Var]
         aux (NonRec _ e') = getOccurringVariables e' bvs
         aux (Rec ls) = bux ls
         bux :: [(Var, Expr Var)] -> [Var]
         bux [] = []
-        bux ((_, e'): xs) = getOccurringVariables e' bvs ++ bux xs
-getOccurringVariables (Case e _ _ alts) bvs = getOccurringVariables e bvs ++ aux alts
+        bux ((_, e'): xs) = (getOccurringVariables e' bvs ++ bux xs) `orderPreservingIntersection` bvs
+getOccurringVariables (Case e _ _ alts) bvs = (getOccurringVariables e bvs ++ aux alts) `orderPreservingIntersection` bvs
   where aux :: [Alt Var] -> [Var]
         aux [] = []
-        aux (Alt _ _ e' : xs) = getOccurringVariables e' bvs ++ aux xs
+        aux (Alt _ _ e' : xs) = (getOccurringVariables e' bvs ++ aux xs) `orderPreservingIntersection` bvs 
 getOccurringVariables (Cast e _) bvs = getOccurringVariables e bvs
 getOccurringVariables (Tick _ e) bvs = getOccurringVariables e bvs
-getOccurringVariables (Type _) _ = []
+getOccurringVariables (Type t) bvs 
+  | isTyVarTy t = filter ( == (getTyVar "how can this be!?" t)) bvs
+  | isForAllTy t = let (_, x) = splitForAllTyVars t
+                   in getOccurringVariables (Type x) bvs
+  | isFunTy t = let (_, t1, t2) = splitFunTy t
+                in (getOccurringVariables (Type t1) bvs ++ getOccurringVariables (Type t2) bvs) `orderPreservingIntersection` bvs
+  | Just (_, ty_apps) <- splitTyConApp_maybe t
+    = foldr f [] ty_apps
+
+  | otherwise = let (t1, t2) = splitAppTy t
+                in (getOccurringVariables (Type t1) bvs ++ getOccurringVariables (Type t2) bvs) `orderPreservingIntersection` bvs
+ where f t ls = (getOccurringVariables (Type t) bvs ++ ls) `orderPreservingIntersection` bvs
 getOccurringVariables (Coercion _) _ = []
 
 updateBind :: Id -> CoreExpr -> CoreProgram -> CoreProgram
@@ -940,6 +1069,7 @@ goElimTraversal lhs rhs = do
   let traversal_structure = destructureTraversal rhs []
   let scheme = ts_scheme traversal_structure
   let everywhere_unfolding = unfoldingTemplate $ realIdUnfolding scheme
+  -- prt everywhere_unfolding
   let inlined_unfolding = letInline everywhere_unfolding
   go_replacement <- mkGoReplacement lhs traversal_structure
   let unfolding_with_replaced_go = pushGoReplacementIntoInlinedUnfolding inlined_unfolding go_replacement
@@ -1055,12 +1185,20 @@ data TraversalStructure = TS { ts_scheme :: Id
                              , ts_transform :: CoreExpr }
 
 destructureTraversal :: CoreExpr -> BoundVars -> TraversalStructure
-destructureTraversal (Everywhere scheme transformation type_arg dict_arg) bvs =
-  TS { ts_scheme = scheme
+destructureTraversal (Everywhere scheme transformation type_arg dict_arg) bvs
+  | isVarEverywhere scheme
+  = TS { ts_scheme = scheme
      , ts_type_arg = type_arg
      , ts_dict_arg = dict_arg
      , ts_transform = transformation
      , ts_bvs = bvs }
+destructureTraversal (Everything scheme tc c q t d) bvs 
+  | isVarEverything scheme
+    = TS { ts_scheme = scheme
+    , ts_type_arg = t
+    , ts_dict_arg = d
+    , ts_transform = q
+    , ts_bvs = bvs }
 destructureTraversal (Lam b e) bvs = destructureTraversal e (b : bvs)
 destructureTraversal _ _ = panic "the impossible happened! the traversal has a different structure than originally intended"
 
@@ -1123,7 +1261,7 @@ optimizeSpecialization gen_traversal_id spec_rhs = do
   -- rhs' <- genericElimination spec_rhs
   rhs' <- fullTransformM gmapTEliminator spec_rhs --transform gmapTDestructurer gmapTTransformer spec_rhs
   -- let rhs = betaReduceCompletely rhs' deBruijnize
-  rhs <- betaReduceCompletelyM rhs'
+  rhs <- betaReduceCompletelyM (letInline rhs')
   prt rhs
   let specs = getSpecializations gen_traversal_id [] rhs
   -- prt specs
@@ -1172,6 +1310,48 @@ gmapTEliminator (App (App (Var v) (Type t)) d)
           let actual_gmapT = dropCasts $ xxx123
           --prt%%%actual_gmapT
           return actual_gmapT
+gmapTEliminator (App (App (Var v) (Type t)) d)
+  | nameStableString (varName v) == "$base$Data.Data$gmapQ"
+    = do
+          putMsgS "UNFOLDING"
+          let uf = unfoldingTemplate $ realIdUnfolding v
+          prt uf
+          d' <- leftInlineLikeCrazy d
+          putMsgS "DICTIONARY"
+          prt d'
+          putMsgS "BETA REDUCING"
+          -- let x = betaReduceCompletely' (App (App uf (Type t)) d') deBruijnize
+          x <- betaReduceCompletelyM (App (App uf (Type t)) d')
+          prt x
+          putMsgS "CASE OF KNOWN CASE"
+          let x' = caseOfKnownCase x
+          prt x'
+          -- putMsgS "DROP CASTS"
+          let y = x' -- dropCasts x'
+          prt y
+          let type_specific_gmapT = y
+          putMsgS "ACTUAL GMAPQ"
+          prt type_specific_gmapT
+          putMsgS "UNFOLDING ACTUAL GMAPT"
+          tttt <- leftInlineLikeCrazy type_specific_gmapT
+          prt tttt
+          return tttt
+          -- putMsgS "DROP CASTS"
+          -- let tttttt = dropCasts tttt
+          -- prt tttttt
+          -- putMsgS "UNFOLDING GUNFOLD IN CASE"
+          -- tttttttt' <- leftInlineLikeCrazy tttttt
+          -- prt tttttttt'
+          -- putMsgS "Let-Inlining"
+          -- let tttttttt'' = letInline tttttttt'
+          -- prt tttttttt''
+          -- putMsgS "Beta Reduction"
+          -- xxx123 <- betaReduceCompletelyM tttttttt''
+          -- prt xxx123
+          -- putMsgS "DROP CASTS"
+          -- let actual_gmapT = dropCasts $ xxx123
+          -- prt actual_gmapT
+          -- return actual_gmapT
 gmapTEliminator x = return x
 
 leftInlineLikeCrazy :: CoreExpr -> CoreM CoreExpr
