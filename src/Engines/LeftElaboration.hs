@@ -20,4 +20,12 @@ leftElaboration extractor elaboration post_process (App f x) = do f' <- leftElab
                                                                   return $ post_process $ App f' x
 leftElaboration extractor elaboration post_process (Cast e c) = do e' <- leftElaboration extractor elaboration post_process e
                                                                    return $ post_process $ Cast e' c
+leftElaboration extractor elaboration post_process (Case e b t alts) = do alts' <- mapM (leftElaborationAlts extractor elaboration post_process) alts
+                                                                          return $ Case e b t alts'
 leftElaboration _ _ post_process x = return $ post_process x
+
+
+leftElaborationAlts :: (CoreExpr -> Maybe b) -> (b -> CoreM CoreExpr) -> (CoreExpr -> CoreExpr) -> Alt CoreBndr -> CoreM (Alt CoreBndr)
+leftElaborationAlts extractor elaboration post_process (Alt alt_con b e) 
+  = do e' <- leftElaboration extractor elaboration post_process e
+       return $ Alt alt_con b e'
