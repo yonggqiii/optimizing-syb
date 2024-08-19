@@ -32,30 +32,30 @@ import Data.Generics
 --   deriving (Typeable, Show, Data)
 --
 --
-incS :: Float -> Salary -> Salary
-incS k (S s) = S (s * (1 + k))
+-- incS :: Float -> Salary -> Salary
+-- incS k (S s) = S (s * (1 + k))
 --
 -- incNum :: Float -> Int -> Int -> Int
 -- incNum a b c = floor a + b + c
 
--- incSM :: Float -> Salary -> IO Salary
--- incSM k (S s) = do
---   let new_s = s * (1 + k)
---   putStrLn $ "Increasing salary from " ++ (show s) ++ " to " ++ (show new_s)
---   return $ S new_s
+incSM :: Float -> Salary -> IO Salary
+incSM k (S s) = do
+  let new_s = s * (1 + k)
+  putStrLn $ "Increasing salary from " ++ (show s) ++ " to " ++ (show new_s)
+  return $ S new_s
 
--- increaseM :: Float -> Company -> IO Company
--- increaseM k = everywhereM $ mkM (incSM k)
+increaseM :: Float -> Company -> IO Company
+increaseM k = everywhereM $ mkM (incSM k)
 
 -- increase :: Float -> Company -> Company
 -- increase :: Data a => Float -> a -> a
 -- increase k = everywhere' $ mkT (incS k)
+-- {-# SPECIALIZE increase :: Data a => Float -> [a] -> [a] #-}
+-- getS :: Salary -> Float
+-- getS (S s) = s
 
-getS :: Salary -> Float
-getS (S s) = s
-
-totalSalary :: Company -> Float
-totalSalary = everything (+) $ mkQ 0 getS
+-- totalSalary :: Company -> Float
+-- totalSalary = everything (+) $ mkQ 0 getS
 
 -- anotherIncrease :: Data a => Float -> a -> a
 -- anotherIncrease k =
@@ -93,23 +93,23 @@ totalSalary = everything (+) $ mkQ 0 getS
 
 main :: IO ()
 main = do
-  let p1 = P "Alice" ""
-  let p2 = P "Bob" ""
-  let p3 = P "Charlie" ""
-  let e1 = E p1 $ S 1000
-  let e2 = E p2 $ S 2000
-  let e3 = E p3 $ S 3000
-  let d1 = D "Alice's place" e1 []
-  let d2 = D "Bob's place" e2 [PU e3]
-  let c = C [d1, d2]
+  -- let p1 = P "Alice" ""
+  -- let p2 = P "Bob" ""
+  -- let p3 = P "Charlie" ""
+  -- let e1 = E p1 $ S 1000
+  -- let e2 = E p2 $ S 2000
+  -- let e3 = E p3 $ S 3000
+  -- let d1 = D "Alice's place" e1 []
+  -- let d2 = D "Bob's place" e2 [PU e3]
+  -- let c = C [d1, d2]
   -- let c = Cons d1 (Cons d2 EmptyList)
-  print c
+  -- print c
   -- new_c <- increaseM 0.1 c
   -- print new_c
   -- let d = increase 0.1 c
   -- print d
-  print $ totalSalary c
+  -- print $ totalSalary c
   -- let myTree = Wrapper $ Tree (Leaf 1) 2 (Leaf 3)
   -- print $ addOneEverywhere myTree 
   -- print $ treeTotal $ addOneEverywhere myTree
-  -- return ()
+  return ()

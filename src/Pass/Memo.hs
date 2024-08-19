@@ -225,13 +225,6 @@ containsTargetExpr (Tick _ e)            = containsTargetExpr e
 containsTargetExpr (Type _)              = False
 containsTargetExpr (Coercion _)          = False
 
-pushEntryToMapOfList :: Eq k => k -> v -> [(k, [v])] -> [(k, [v])]
-pushEntryToMapOfList k v [] = [(k, [v])]
-pushEntryToMapOfList k v ((lhs, rhs) : entries)
-  | k == lhs = (lhs, rhs) : entries
-  | otherwise = (lhs, rhs) : pushEntryToMapOfList k v entries
-
-
 elemAnywhere :: Id -> FunctionMap -> Bool
 elemAnywhere _ [] = False
 elemAnywhere loc ((k, v) : xs) = 
@@ -428,9 +421,11 @@ extractTraversals program' (fn_map_entry : fn_map) = do
 pattern Everywhere :: Var -> CoreExpr -> Type -> CoreExpr -> CoreExpr
 pattern Everywhere e f t d <- (App (App (App (Var e) f) (Type t)) d)
 
+-- | This pattern matches expressions in the form of `e @t f g @t2 $d`
 pattern Everything :: Var -> Type -> CoreExpr -> CoreExpr -> Type -> CoreExpr -> CoreExpr
 pattern Everything e t c q qt qd <- App (App (App (App (App (Var e) (Type t)) c) q) (Type qt)) qd
 
+-- | This pattern matches expressions in the form of `e @t $d f @t2 $d2`
 pattern EverywhereM :: Var -> Type -> CoreExpr -> CoreExpr -> Type -> CoreExpr -> CoreExpr
 pattern EverywhereM e m md tr t d <- App (App (App (App (App (Var e) (Type m)) md) tr) (Type t)) d
 
@@ -438,151 +433,44 @@ pattern EverywhereM e m md tr t d <- App (App (App (App (App (Var e) (Type m)) m
 -- | Extracts all traversals from an expression. 
 extractTraversalsFromExpression :: CoreExpr -> BoundVars -> CoreM TEExprR
 {- Important case -}
-extractTraversalsFromExpression (Everywhere combinator transformation arg_to_combinator dictionary_arg_to_combinator) bound_vars
-  | isVarEverywhere combinator = do
+extractTraversalsFromExpression (Everywhere scheme f' type_arg d_arg) bound_vars
+  | isVarEverywhere scheme = do
       -- perform extraction on any other relevant expression
-      rec_result <- extractTraversalsFromExpression transformation bound_vars 
-      let real_transformation = teer_result_expr rec_result
-          spec1               = teer_spec_map rec_result
-          subst1              = teer_subst_map rec_result
-          core_binds1         = teer_new_binds rec_result
-          new_traversal_ids   = teer_new_traversal_ids rec_result
-
-      let target_expr = App (Var combinator) real_transformation
-      -- obtain the bound variables of this expression
-      let bound_vars_of_expression = getOccurringVariables real_transformation bound_vars
-      let type_of_target_expr = exprType target_expr
-      let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
-      -- create the RHS
-      (traversal_rhs, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
-      traversal_lhs <- mkTraversalLHS type_of_traversal
-      let new_bind_for_traversal = Rec [(traversal_lhs, traversal_rhs)]
-      -- create the replaced traversal
-      let replaced_expr = createReplacedTraversal traversal_lhs arg_to_combinator dictionary_arg_to_combinator bound_vars_of_expression
-      let template_entry = (template_left, traversal_lhs)
-      -- check if specializable
-      new_spec <- 
-        if isTypeFullyConcrete arg_to_combinator && null (getOccurringVariables dictionary_arg_to_combinator bound_vars) then do
-          putMsgS " ==== PUSH ==== "
-          prt arg_to_combinator
-          prt dictionary_arg_to_combinator
-          return $ pushEntryToMapOfList traversal_lhs (arg_to_combinator, dictionary_arg_to_combinator) spec1
-        else do
-          putMsgS " ==== NO PUSH ==== "
-          prt arg_to_combinator
-          prt dictionary_arg_to_combinator
-          return spec1 
-        
-      -- putMsg $ ppr new_bind_for_traversal
-      -- putMsg $ ppr replaced_expr
-      return TEER { teer_result_expr        = replaced_expr
-                  , teer_spec_map           = new_spec
-                  , teer_subst_map          = template_entry : subst1
-                  , teer_new_binds          = new_bind_for_traversal : core_binds1
-                  , teer_new_traversal_ids  = traversal_lhs : new_traversal_ids}
+      TEER { teer_result_expr = f
+           , teer_spec_map    = specs
+           , teer_subst_map   = subst
+           , teer_new_binds   = binds
+           , teer_new_traversal_ids = ids
+           } <- extractTraversalsFromExpression f' bound_vars
+      -- the core expression we are abstracting over
+      let target_expr = App (Var scheme) f
+      extractTraversalsFromTargetExpression target_expr bound_vars type_arg d_arg specs subst binds ids
 extractTraversalsFromExpression (Everything s tr c q t d) bound_vars
   | isVarEverything s = do
+      -- extract traversals from sub expressions
       rec_result1 <- extractTraversalsFromExpression c bound_vars
       rec_result2 <- extractTraversalsFromExpression q bound_vars
       let real_c = teer_result_expr rec_result1
           real_q  = teer_result_expr rec_result2
-          spec1   = teer_spec_map rec_result1 ++ teer_spec_map rec_result2
-          subst1  = teer_subst_map rec_result1 ++ teer_subst_map rec_result2
-          core_binds1 = teer_new_binds rec_result1 ++ teer_new_binds rec_result2
-          new_traversal_ids = teer_new_traversal_ids rec_result1 ++ teer_new_traversal_ids rec_result2
-      -- -- perform extraction on any other relevant expression
-      -- rec_result <- extractTraversalsFromExpression transformation bound_vars 
-      -- let real_transformation = teer_result_expr rec_result
-      --     spec1               = teer_spec_map rec_result
-      --     subst1              = teer_subst_map rec_result
-      --     core_binds1         = teer_new_binds rec_result
-      --     new_traversal_ids   = teer_new_traversal_ids rec_result
+          spec   = teer_spec_map rec_result1 ++ teer_spec_map rec_result2
+          sub  = teer_subst_map rec_result1 ++ teer_subst_map rec_result2
+          binds = teer_new_binds rec_result1 ++ teer_new_binds rec_result2
+          ids = teer_new_traversal_ids rec_result1 ++ teer_new_traversal_ids rec_result2
+      -- the core expression we are abstracting over
       let target_expr = App (App (App (Var s) (Type tr)) real_c) real_q
-      -- let target_expr = App (Var combinator) real_transformation
-      -- obtain the bound variables of this expression
-      let bound_vars_of_expression = getOccurringVariables target_expr bound_vars
-      let type_of_target_expr = exprType target_expr
-      let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
-      -- create the RHS
-      (traversal_rhs, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
-      -- prt $ exprType traversal_rhs
-      traversal_lhs <- mkTraversalLHS type_of_traversal
-      let new_bind_for_traversal = Rec [(traversal_lhs, traversal_rhs)]
-      -- create the replaced traversal
-      let replaced_expr = createReplacedTraversal traversal_lhs t d bound_vars_of_expression
-      let template_entry = (template_left, traversal_lhs)
-      -- check if specializable
-      new_spec <- 
-        if isTypeFullyConcrete t && null (getOccurringVariables d bound_vars) then do
-          putMsgS " ==== PUSH ==== "
-          prt t
-          prt d
-          return $ pushEntryToMapOfList traversal_lhs (t, d) spec1
-        else do
-          putMsgS " ==== NO PUSH ==== "
-          prt t
-          prt d
-          return spec1 
-      -- prt new_bind_for_traversal
-      -- putMsg $ ppr new_bind_for_traversal
-      -- putMsg $ ppr replaced_expr
-      return TEER { teer_result_expr        = replaced_expr
-                  , teer_spec_map           = new_spec
-                  , teer_subst_map          = template_entry : subst1
-                  , teer_new_binds          = new_bind_for_traversal : core_binds1
-                  , teer_new_traversal_ids  = traversal_lhs : new_traversal_ids}
-extractTraversalsFromExpression (EverywhereM s tr c q t d) bound_vars
-  | isVarEverywhereM s = do
-      -- TODO: no need to extract traversals from dict_arg c
-      rec_result1 <- extractTraversalsFromExpression c bound_vars
-      rec_result2 <- extractTraversalsFromExpression q bound_vars
-      let real_c = teer_result_expr rec_result1
-          real_q  = teer_result_expr rec_result2
-          spec1   = teer_spec_map rec_result1 ++ teer_spec_map rec_result2
-          subst1  = teer_subst_map rec_result1 ++ teer_subst_map rec_result2
-          core_binds1 = teer_new_binds rec_result1 ++ teer_new_binds rec_result2
-          new_traversal_ids = teer_new_traversal_ids rec_result1 ++ teer_new_traversal_ids rec_result2
-      -- -- perform extraction on any other relevant expression
-      -- rec_result <- extractTraversalsFromExpression transformation bound_vars 
-      -- let real_transformation = teer_result_expr rec_result
-      --     spec1               = teer_spec_map rec_result
-      --     subst1              = teer_subst_map rec_result
-      --     core_binds1         = teer_new_binds rec_result
-      --     new_traversal_ids   = teer_new_traversal_ids rec_result
-      let target_expr = App (App (App (Var s) (Type tr)) real_c) real_q
-      -- let target_expr = App (Var combinator) real_transformation
-      -- obtain the bound variables of this expression
-      let bound_vars_of_expression = getOccurringVariables target_expr bound_vars
-      let type_of_target_expr = exprType target_expr
-      let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
-      -- create the RHS
-      (traversal_rhs, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
-      -- prt $ exprType traversal_rhs
-      traversal_lhs <- mkTraversalLHS type_of_traversal
-      let new_bind_for_traversal = Rec [(traversal_lhs, traversal_rhs)]
-      -- create the replaced traversal
-      let replaced_expr = createReplacedTraversal traversal_lhs t d bound_vars_of_expression
-      let template_entry = (template_left, traversal_lhs)
-      -- check if specializable
-      new_spec <- 
-        if isTypeFullyConcrete t && null (getOccurringVariables d bound_vars) then do
-          putMsgS " ==== PUSH ==== "
-          prt t
-          prt d
-          return $ pushEntryToMapOfList traversal_lhs (t, d) spec1
-        else do
-          putMsgS " ==== NO PUSH ==== "
-          prt t
-          prt d
-          return spec1 
-      -- prt new_bind_for_traversal
-      -- putMsg $ ppr new_bind_for_traversal
-      -- putMsg $ ppr replaced_expr
-      return TEER { teer_result_expr        = replaced_expr
-                  , teer_spec_map           = new_spec
-                  , teer_subst_map          = template_entry : subst1
-                  , teer_new_binds          = new_bind_for_traversal : core_binds1
-                  , teer_new_traversal_ids  = traversal_lhs : new_traversal_ids}
+      extractTraversalsFromTargetExpression target_expr bound_vars t d spec sub binds ids
+extractTraversalsFromExpression (EverywhereM scheme m m_dict f' type_arg d_arg) bound_vars
+  | isVarEverywhereM scheme = do
+      TEER {
+        teer_result_expr = f
+        , teer_spec_map = spec
+        , teer_subst_map = sub
+        , teer_new_binds = binds
+        , teer_new_traversal_ids = ids
+      } <- extractTraversalsFromExpression f' bound_vars
+      -- the core expression we are abstracting over
+      let target_expr = App (App (App (Var scheme) (Type m)) m_dict) f
+      extractTraversalsFromTargetExpression target_expr bound_vars type_arg d_arg spec sub binds ids
 -- Trivial cases
 extractTraversalsFromExpression (Var i) _      = return $ mkEmptyTEExprR $ Var i
 extractTraversalsFromExpression (Lit l) _      = return $ mkEmptyTEExprR $ Lit l
@@ -690,6 +578,50 @@ extractTraversalsFromExpression (Case e var t alts) bound_vars = do
                }                                <- extractTraversalsFromExpression expr new_bound_vars
           return (Alt alt_con names e' : alts', spec2 ++ spec1, subst2 ++ subst1, binds1 ++ binds2, ids1 ++ ids2)
 
+-- | Extract the traversal from a given target expression
+extractTraversalsFromTargetExpression :: CoreExpr -> BoundVars -> Type -> CoreExpr -> SpecializationMap -> SubstitutionMap -> [CoreBind] -> [Id] -> CoreM TEExprR
+extractTraversalsFromTargetExpression target_expr bound_vars type_arg dict_arg spec_map subst_map new_binds new_ids 
+  = do  -- obtain the occurring bound variables of this expression;
+        -- this is so that we can wrap all the bound variables
+        -- in lambdas
+        let occurring_bound_vars = getOccurringVariables target_expr bound_vars
+        -- now we get the type of this expression; we need this so that 
+        -- we can create the traversal function type.
+        let target_expr_type = exprType target_expr
+        -- now we create the type of the traversal function type
+        let type_of_traversal = createTraversalFunctionType target_expr_type occurring_bound_vars
+        -- now we create the RHS of the traversal; i.e., wrap the core expression around lambdas
+        -- of the occuring bound variables. We can also make the substitution template at 
+        -- the same time.
+        (traversal_rhs, template) <- mkTraversalRHSAndTemplate target_expr occurring_bound_vars type_of_traversal
+        -- now make the name of the traversal. we must also give it its type.
+        traversal_lhs <- mkTraversalLHS type_of_traversal
+        -- now we can make the actual bind. it is for sure recursive, especially once we
+        -- eliminate the scheme.
+        let new_bind = Rec [(traversal_lhs, traversal_rhs)]
+        -- now the original expression needs to be replaced with an invocation
+        -- of the newly created traversal function.
+        let replaced_expr = createReplacedTraversal traversal_lhs type_arg dict_arg occurring_bound_vars
+        -- we also need to register the template and resulting id to replace with,
+        -- in the substitution map
+        let subst_entry = (template, traversal_lhs)
+        -- if these arguments are specializable, add them to the specialization map
+        let specs = if isTypeFullyConcrete type_arg && null (getOccurringVariables dict_arg bound_vars)
+                    then pushEntryToMapOfList traversal_lhs (type_arg, dict_arg) spec_map
+                    else spec_map
+        return $ TEER { teer_result_expr = replaced_expr
+                      , teer_spec_map    = specs
+                      , teer_subst_map   = subst_entry : subst_map
+                      , teer_new_binds = new_bind : new_binds
+                      , teer_new_traversal_ids = traversal_lhs : new_ids }
+
+-- | Pushes a k -> v pair into a map of k -> [v]
+pushEntryToMapOfList :: Eq k => k -> v -> [(k, [v])] -> [(k, [v])]
+pushEntryToMapOfList k v [] = [(k, [v])]
+pushEntryToMapOfList k v ((lhs, rhs) : entries)
+  | k == lhs = (lhs, rhs) : entries
+  | otherwise = (lhs, rhs) : pushEntryToMapOfList k v entries
+
 pushTraversals :: CoreProgram 
                -> [Id] 
                -> SpecializationMap 
@@ -726,22 +658,18 @@ createTraversalFunctionType target_expr_type bound_vars =
 
 performSubstitution :: Expr Var -> (Expr Var, Var) -> CoreM (Maybe Var)
 performSubstitution candidate (matcher, traversal) = do
-  -- putMsgS "======= COMPARISONS ==============="
-  -- putMsg $ ppr candidate
-  -- putMsg $ ppr matcher
   if deBruijnize candidate == deBruijnize matcher then 
     return $ return traversal
   else 
     return Nothing
 
 tryAllSubstitutions :: Expr Var -> SubstitutionMap -> CoreM (Maybe Var)
-tryAllSubstitutions candidate [] = return Nothing
+tryAllSubstitutions _ [] = return Nothing
 tryAllSubstitutions candidate (x : xs) = do
   x' <- performSubstitution candidate x
   case x' of 
     Nothing -> tryAllSubstitutions candidate xs
     y -> return y
-
 
 
 pushTraversalsIntoExpression :: Expr Var -> SubstitutionMap -> [Var] -> CoreM (Expr Var, SpecializationMap)
@@ -939,15 +867,6 @@ createReplacedTraversal traversal_name type_arg dict_arg = aux base_expr
         aux e (b : bs)
           | isTyVar b = let e' = aux e bs in App e' (Type $ mkTyVarTy b)
           | otherwise = let e' = aux e bs in App e' (Var b)
-        -- aux e (b : bs) = let e' = aux e bs
-        --                  in  App e' (Var b)
-
-orderPreservingUnion :: Eq a => [a] -> [a] -> [a]
-orderPreservingUnion x [] = x
-orderPreservingUnion [] x = x
-orderPreservingUnion (x : xs) ys = if x `notElem` ys
-                                   then x : (xs `orderPreservingUnion` ys)
-                                   else xs `orderPreservingUnion` ys
 
 orderPreservingIntersection :: Eq a => [a] -> [a] -> [a]
 orderPreservingIntersection _ [] = []
@@ -1061,9 +980,7 @@ goElimTraversal lhs rhs = do
   beta_reduced_let_inlined_go <- betaReduceCompletelyM let_inlined_unfolding_with_replaced_go
   let rhs' = substitute scheme beta_reduced_let_inlined_go rhs
   -- let rhs'' = betaReduceCompletely rhs' deBruijnize
-  rhs'' <- betaReduceCompletelyM rhs'
-  -- showAllTypes rhs''
-  return rhs''
+  betaReduceCompletelyM rhs'
 
 class NameShow a where
   showAllNames :: a -> CoreM ()
@@ -1264,42 +1181,11 @@ gmapTEliminator (App (App (Var v) (Type t)) d)
     = do
           let uf = unfoldingTemplate $ realIdUnfolding v
           d' <- leftInlineLikeCrazy d
-          putMsgS "DICTIONARY"
-          prt d'
-          putMsgS "BETA REDUCING"
-          -- let x = betaReduceCompletely' (App (App uf (Type t)) d') deBruijnize
           x <- betaReduceCompletelyM (App (App uf (Type t)) d')
-          prt x
-          --putMsgS%%%"CASE OF KNOWN CASE"
-          let x' = caseOfKnownCase x
-          --prt%%%x'
-          --putMsgS%%%"DROP CASTS"
-          let y = dropCasts x'
-          --prt%%%y
-          let type_specific_gmapT = y
-          --prt%%%type_specific_gmapT
-          --putMsgS%%%"UNFOLDING ACTUAL GMAPT"
+          let type_specific_gmapT = caseOfKnownCase x
           tttt <- leftInlineLikeCrazy type_specific_gmapT
-          --prt%%%tttt
-          -- let (Var v') = type_specific_gmapT
-          -- --prt%%%$ exprType (Var v')
-          -- --prt%%%$ unfoldingTemplate $ realIdUnfolding v
-          --putMsgS%%%"DROP CASTS"
-          let tttttt = dropCasts tttt
-          --prt%%%tttttt
-          --putMsgS%%%"UNFOLDING GUNFOLD IN CASE"
-          tttttttt' <- leftInlineLikeCrazy tttttt
-          --prt%%%tttttttt'
-          --putMsgS%%%"Let-Inlining"
-          let tttttttt'' = letInline tttttttt'
-          --prt%%%tttttttt''
-          --putMsgS%%%"Beta Reduction"
-          -- let xxx123 = betaReduceCompletely tttttttt'' deBruijnize
-          xxx123 <- betaReduceCompletelyM tttttttt''
-          --prt%%%xxx123
-          --putMsgS%%%"DROP CASTS"
-          let actual_gmapT = dropCasts $ xxx123
-          --prt%%%actual_gmapT
+          let tttttttt'' = letInline tttt
+          actual_gmapT <- betaReduceCompletelyM tttttttt''
           return actual_gmapT
 gmapTEliminator (App (App (Var v) (Type t)) d)
   | nameStableString (varName v) == "$base$Data.Data$gmapQ"

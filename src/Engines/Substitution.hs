@@ -154,7 +154,7 @@ instance Substitutable Type Coercion where
                                     substt = TCvSubst iss tvenv tcvenv
                                     res = substCo substt coercion 
                                     s = showSDocUnsafe $ ppr res 
-                                in seq (unsafePerformIO (putStrLn s)) res -- substCo substt coercion
+                                in res -- seq (unsafePerformIO (putStrLn s)) res -- substCo substt coercion
 instance Substitutable Type (Alt Var) where
   substitute :: Var -> Type -> Alt Var -> Alt Var
   substitute from _ _

@@ -5,7 +5,11 @@ import GHC.Core.Map.Type (deBruijnize)
 
 leftElaborationLikeCrazy :: (CoreExpr -> Maybe b) -> (b -> CoreM CoreExpr) -> (CoreExpr -> CoreExpr) -> CoreExpr -> CoreM CoreExpr
 leftElaborationLikeCrazy extractor elaboration post_processor expr 
-  = do e' <- leftElaboration extractor elaboration post_processor expr
+  = do putMsgS "LEFT ELAB"
+       putMsg $ ppr expr
+       e' <- leftElaboration extractor elaboration id expr --post_processor expr
+       putMsgS "HERE"
+       putMsg $ ppr e'
        if deBruijnize expr == deBruijnize e'
        then return expr
        else leftElaborationLikeCrazy extractor elaboration post_processor e'
