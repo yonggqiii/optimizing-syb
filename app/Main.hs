@@ -43,11 +43,11 @@ import Data.Generics
 -- increase :: Data a => Float -> a -> a
 -- increase k = everywhere' $ mkT (incS k)
 
-getS :: Salary -> Float
-getS (S s) = s
+-- getS :: Salary -> Float
+-- getS (S s) = s
 
-totalSalary :: Company -> Float
-totalSalary = everything (+) $ mkQ 0 getS
+-- totalSalary :: Company -> Float
+-- totalSalary = everything (+) $ mkQ 0 getS
 
 -- anotherIncrease :: Data a => Float -> a -> a
 -- anotherIncrease k =
@@ -73,20 +73,33 @@ totalSalary = everything (+) $ mkQ 0 getS
 
 -- nonsense :: a -> a
 -- nonsense x = x
+
+addOne :: Int -> Int
+addOne = (+) 1
+
+addOneEverywhere :: Wrapper -> Wrapper
+addOneEverywhere = everywhere $ mkT addOne
+
+treeTotal :: Wrapper -> Int
+treeTotal = everything (+) $ mkQ 0 (id :: Int -> Int)
+
 main :: IO ()
 main = do
-  let p1 = P "Alice" ""
-  let p2 = P "Bob" ""
-  let p3 = P "Charlie" ""
-  let e1 = E p1 $ S 1000
-  let e2 = E p2 $ S 2000
-  let e3 = E p3 $ S 3000
-  let d1 = D "Alice's place" e1 []
-  let d2 = D "Bob's place" e2 [PU e3]
-  let c = C [d1, d2]
+  -- let p1 = P "Alice" ""
+  -- let p2 = P "Bob" ""
+  -- let p3 = P "Charlie" ""
+  -- let e1 = E p1 $ S 1000
+  -- let e2 = E p2 $ S 2000
+  -- let e3 = E p3 $ S 3000
+  -- let d1 = D "Alice's place" e1 []
+  -- let d2 = D "Bob's place" e2 [PU e3]
+  -- let c = C [d1, d2]
   -- let c = Cons d1 (Cons d2 EmptyList)
-  print c
+  -- print c
   -- let d = increase 0.1 c
   -- print d
-  print $ totalSalary c
-  return ()
+  -- print $ totalSalary c
+  let myTree = Wrapper $ Tree (Leaf 1) 2 (Leaf 3)
+  print $ addOneEverywhere myTree 
+  print $ treeTotal $ addOneEverywhere myTree
+  -- return ()
