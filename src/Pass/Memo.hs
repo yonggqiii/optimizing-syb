@@ -76,7 +76,9 @@ memoSpecModGuts mod_guts = do
       , ter_traversal_ids = traversal_ids
       }                                           <- extractTraversals all_binds function_map
   new_program <- goElim traversal_extracted_program traversal_ids
-  let swls = map initSpecializationWorkList spec_map
+  -- look through spec list for dictionaries that are found in this program
+  spec_map' <- inlineDictionaries spec_map new_program
+  let swls = map initSpecializationWorkList spec_map'
   (swls', new_program') <- specTraversals swls new_program
   final_pgm <- replaceProgramWithSpecializations new_program' swls'
   let new_mod_guts = mod_guts { mg_binds = final_pgm }
@@ -1077,6 +1079,19 @@ pushGoReplacementIntoInlinedUnfolding (App f x) b = App (pushGoReplacementIntoIn
 pushGoReplacementIntoInlinedUnfolding (Lam b e) r = Lam b (pushGoReplacementIntoInlinedUnfolding e r)
 pushGoReplacementIntoInlinedUnfolding v _ = v
 
+inlineDictionaries :: SpecializationMap -> CoreProgram -> CoreM SpecializationMap
+inlineDictionaries spec_map pgm = fullTransformM (inlineDictionariesExpr pgm) spec_map
+-- inlineDictionariesEntry :: CoreProgram -> (Id, [(Type, CoreExpr)]) -> (Id, [(Type, CoreExpr)])
+-- inlineDictionariesEntry pgm (id, (t, e)) = (id, inlineDictionariesExpr pgm)
+inlineDictionariesExpr :: CoreProgram -> CoreExpr -> CoreM CoreExpr
+inlineDictionariesExpr pgm (Var v)
+  = do let lhss = pgm >>= bindersOf
+       if v `elem` lhss
+       then do putMsgS "FOUND INLINABLE DICTIONARY"
+               prt v
+               return $ lookupTopLevelRHS v pgm 
+       else return $ Var v
+inlineDictionariesExpr _ e = return e
 
 data TraversalStructure = TS { ts_scheme :: Id
                              , ts_type_arg :: Type

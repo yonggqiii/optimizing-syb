@@ -89,3 +89,13 @@ instance FullTransform CoreExpr (Alt Var) where
     = do e' <- fullTransformM f e
          return $ Alt alt_con bs e'
 
+instance FullTransform CoreExpr (Type, CoreExpr) where
+  fullTransform f (l, r) = (l, fullTransform f r)
+  fullTransformM f (l, r) = do r' <- fullTransformM f r
+                               return (l, r')
+
+instance FullTransform CoreExpr (Id, [(Type, CoreExpr)]) where
+  fullTransform f (id', ls) = (id', fullTransform f ls)
+  fullTransformM f (id', ls)
+    = do ls' <- fullTransformM f ls
+         return (id', ls')
