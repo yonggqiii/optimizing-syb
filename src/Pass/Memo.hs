@@ -8,10 +8,10 @@ import GHC.Plugins
 import Control.Monad
 import Data.Maybe 
 import GHC.Core.Map.Type
-import Engines.DropCasts (DropCasts(dropCasts))
 import Engines.LeftElaboration
 import Engines.Transform
 import Engines.InlineUnfolding (inlineId)
+import Utils 
 
 
 {- This phase should come before all the other optimization phases 
@@ -62,19 +62,24 @@ import Engines.InlineUnfolding (inlineId)
  - invocations of `mkT`-}
 
 -- | The memoized specializing pass specializes traversals.
-memoizedSpecialize :: CoreToDo
-memoizedSpecialize = CoreDoPluginPass "Memoizing Specialization" memoSpecModGuts
+memoizedSpecialize :: Opts ->  CoreToDo
+memoizedSpecialize opts = CoreDoPluginPass "Memoizing Specialization" (memoSpecModGuts opts)
 
 -- | Performs memoizing specialization on the 'ModGuts' of the program
-memoSpecModGuts :: CorePluginPass
-memoSpecModGuts mod_guts = do
-  putMsgS "Running phase: Memoizing Specialization"
+memoSpecModGuts :: Opts -> CorePluginPass
+memoSpecModGuts opts mod_guts = do
   let all_binds    = mg_binds mod_guts
-      function_map = initFunctionMap all_binds
+
+  -- Function map initialization
+  prtSIf (show_fn_map opts) $ info "Running function map initialization"
+  function_map <- initFunctionMap opts all_binds
+
+  -- Traversal extraction
+  prtSIf (show_traversal_extraction opts) $ info "Running traversal extraction"
   TER { ter_program         = traversal_extracted_program
       , ter_traversal_specs = spec_map
       , ter_traversal_ids   = traversal_ids
-      }                                           <- extractTraversals all_binds function_map
+      }                                           <- extractTraversals opts all_binds function_map
   new_program <- goElim traversal_extracted_program traversal_ids
   -- look through spec list for dictionaries that are found in this program
   spec_map' <- inlineDictionaries spec_map new_program
@@ -125,40 +130,52 @@ type FunctionMap = [(Id, [Id])]
 --    1.  all RHS functions are equivalent in implementation to
 --        the bind location on the LHS
 --    2.  in the RHS, at least one of them has a traversal that can be fully-specialized
-initFunctionMap :: [CoreBind]  -- ^ The full program
-                -> FunctionMap -- ^ The resulting 'FunctionMap'
+initFunctionMap :: Opts
+                -> [CoreBind]  -- ^ The full program
+                -> CoreM FunctionMap -- ^ The resulting 'FunctionMap'
                           -- get all the specialization groups in the program. these may not 
                           -- be interesting.
-initFunctionMap pgm = let specialize_groups           = groupSpecializedFunctions pgm
-                          -- get all the interesting functions (ones with specializable traversals)
-                          -- 'specialize_groups' is passed in so that we do not duplicate work
-                          interesting_fns             = bindsWithTargetExpr specialize_groups pgm
-                          -- remove uninteresting specialization groups
-                          interesting_specializations = filterSpecializationGroupsWithNoSpecializableTraversal specialize_groups pgm
-                          -- result is just the combination of everything interesting
-                      in  interesting_fns ++ interesting_specializations
+initFunctionMap opts pgm
+  = do specialize_groups           <- groupSpecializedFunctions opts pgm
+        -- get all the interesting functions (ones with specializable traversals)
+        -- 'specialize_groups' is passed in so that we do not duplicate work
+       interesting_fns             <- bindsWithTargetExpr opts specialize_groups pgm
+        -- remove uninteresting specialization groups
+       interesting_specializations <- filterSpecializationGroupsWithNoSpecializableTraversal opts specialize_groups pgm
+        -- result is just the combination of everything interesting
+       let result = interesting_fns ++ interesting_specializations
+       if null result
+       then prtSIf (show_fn_map opts) $ warn "Function map initialization: found nothing interesting; nothing to do!"
+       else do prtSIf (show_fn_map opts) $ success "Function map initialization: found functions to specialize"
+               prtIf (show_fn_map opts) result
+       return result
 
 
 -- | Gets all binds in a program that contain a specialize rule. It produces a 'FunctionMap'
 -- id -> [id] such that the LHS id is a bind with rules, and the RHS list of 
 -- ids are the specialized versions of the LHS.
-groupSpecializedFunctions :: [CoreBind] -- ^ The list of binds in the program
-                          -> FunctionMap -- ^ The list of functions with specialization rules
-groupSpecializedFunctions [] = []
-groupSpecializedFunctions (x : xs) = let names                 = bindersOf x
-                                         potential_map_entries = map getSpecializeGroupFromId names
-                                         map_entries           = collectNonMaybes potential_map_entries
-                                         rec_res               = groupSpecializedFunctions xs
-                                     in  map_entries ++ rec_res
-  where getSpecializeGroupFromId :: Var -> Maybe (Id, [Id])
+groupSpecializedFunctions :: Opts
+                          -> [CoreBind] -- ^ The list of binds in the program
+                          -> CoreM FunctionMap -- ^ The list of functions with specialization rules
+groupSpecializedFunctions opts [] = return []
+groupSpecializedFunctions opts (x : xs) 
+  = do let names                 = bindersOf x
+       potential_map_entries <- mapM getSpecializeGroupFromId names
+       let map_entries           = collectNonMaybes potential_map_entries
+       rec_res               <- groupSpecializedFunctions opts xs
+       return $  map_entries ++ rec_res
+  where getSpecializeGroupFromId :: Var -> CoreM (Maybe (Id, [Id]))
         getSpecializeGroupFromId v 
           = do let all_rules_of_bind = idCoreRules v
                    spec_rules_of_bind = filter (isRuleNameSpec . ru_name) all_rules_of_bind
                if null spec_rules_of_bind
-               then Nothing
+               then return Nothing
                else do let rhs_of_spec_rules = map ru_rhs spec_rules_of_bind
                            rhs_as_vars = getSpecializedIDsFromSpecExpression rhs_of_spec_rules
-                       return (v, v : rhs_as_vars) -- specialization group includes itself
+                       prtSIf (show_fn_map opts) $ info "Function map initialization: ID has specialization rules"
+                       let res = (v, v : rhs_as_vars) -- specialization group includes itself
+                       prtIf (show_fn_map opts) res
+                       return $ Just res
         getSpecializedIDsFromSpecExpression :: [Expr Var] -> [Var]
         getSpecializedIDsFromSpecExpression [] = []
         getSpecializedIDsFromSpecExpression (App f _ : xs') = getSpecializedIDsFromSpecExpression (f : xs')
@@ -174,32 +191,39 @@ groupSpecializedFunctions (x : xs) = let names                 = bindersOf x
         collectNonMaybes (_ : xs') = collectNonMaybes xs'
 
 -- | Produces a 'FunctionMap' containing the binds that contain the target expression.
-bindsWithTargetExpr :: FunctionMap  -- ^ The current map so that duplicates are not added
+bindsWithTargetExpr :: Opts
+                    -> FunctionMap  -- ^ The current map so that duplicates are not added
                     -> [CoreBind]   -- ^ The bind to search
-                    -> FunctionMap  -- ^ The a separate 'FunctionMap' containing binds of interest, 
+                    -> CoreM FunctionMap  -- ^ The a separate 'FunctionMap' containing binds of interest, 
                                     -- excluding those that are specialized
-bindsWithTargetExpr mp pgm
+bindsWithTargetExpr opts mp pgm
     = let flattened_binds = flattenBinds pgm
       in  bux flattened_binds 
-  where bux :: [(Id, CoreExpr)] -> FunctionMap
-        bux [] = []
+  where bux :: [(Id, CoreExpr)] -> CoreM FunctionMap
+        bux [] = return []
         bux ((lhs, rhs) : xs)
           | lhs `elemAnywhere` mp = r
-          | containsTargetExpr rhs = (lhs, [lhs]) : r
+          | containsTargetExpr rhs = do prtSIf (show_fn_map opts) $ info "Function map initialization: Found bind with extractable function"
+                                        prtIf (show_fn_map opts) (lhs, rhs) 
+                                        r' <- r 
+                                        return $ (lhs, [lhs]) : r'
           | otherwise = r
           where r = bux xs
         
 -- | Ensures that every specialization group has at least one specializable traversal.
-filterSpecializationGroupsWithNoSpecializableTraversal :: FunctionMap -> [CoreBind] -> FunctionMap
-filterSpecializationGroupsWithNoSpecializableTraversal [] _ = []
-filterSpecializationGroupsWithNoSpecializableTraversal ((loc, ls_locs) : xs) pgm 
-  | any aux ls_locs = (loc, ls_locs) : rec_res
-  | otherwise       = rec_res  
+filterSpecializationGroupsWithNoSpecializableTraversal :: Opts -> FunctionMap -> [CoreBind] -> CoreM FunctionMap
+filterSpecializationGroupsWithNoSpecializableTraversal opts [] _ = return []
+filterSpecializationGroupsWithNoSpecializableTraversal opts ((loc, ls_locs) : xs) pgm 
+  | any aux ls_locs = do prtSIf (show_fn_map opts) $ info "Function map initialization: found specializable traversal in this specialization group"
+                         prtIf (show_fn_map opts) (loc, ls_locs)
+                         rec_res' <- rec_res
+                         return $ (loc, ls_locs) : rec_res'
+  | otherwise       = rec_res
   where aux :: Id -> Bool
         aux lhs = let e = lookupTopLevelRHS lhs pgm
                   in  containsTargetExpr e
-        rec_res :: FunctionMap
-        rec_res = filterSpecializationGroupsWithNoSpecializableTraversal xs pgm
+        rec_res :: CoreM FunctionMap
+        rec_res = filterSpecializationGroupsWithNoSpecializableTraversal opts xs pgm
 
 -- | Determines if an expression contains the expression of interest, 
 -- e.g. 'everywhere f' or 'everything f q' for some 'f' and 'q'
@@ -370,21 +394,22 @@ type BoundVars = [Var]
 
 -- | Extract the traversals in the program into separate functions, and replaces 
 -- the traversal expressions with invocations of those functions
-extractTraversals :: CoreProgram
+extractTraversals :: Opts
+                  -> CoreProgram
                   -> FunctionMap
                   -> CoreM TraversalExtractionResult
 
 -- Nothing to do
-extractTraversals program [] = return TER { ter_program         = program
-                                          , ter_traversal_specs = []
-                                          , ter_traversal_ids   = [] }
+extractTraversals _ program [] = return TER { ter_program         = program
+                                            , ter_traversal_specs = []
+                                            , ter_traversal_ids   = [] }
 -- Main case
-extractTraversals program' (fn_map_entry : fn_map) = do
+extractTraversals opts program' (fn_map_entry : fn_map) = do
   -- Get any recursive result
   TER { ter_program         = program
       , ter_traversal_specs = traversal_specs
       , ter_traversal_ids   = traversal_ids
-      }                                         <- extractTraversals program' fn_map
+      }                                         <- extractTraversals opts program' fn_map
 
   -- Now is time to extract the traversals from the current map entry
   let (left_bindloc, right_bindlocs) = fn_map_entry
@@ -396,7 +421,7 @@ extractTraversals program' (fn_map_entry : fn_map) = do
        , teer_subst_map         = extracted_subst_map
        , teer_new_binds         = extracted_traversal_binds
        , teer_new_traversal_ids = extracted_traversal_ids
-       }                                                     <- extractTraversalsFromExpression left_expr []
+       }                                                     <- extractTraversalsFromExpression opts left_expr []
   
   -- Once the traversals in this bind has been extracted, we update the program.
   -- There are two things to do: 
@@ -409,7 +434,8 @@ extractTraversals program' (fn_map_entry : fn_map) = do
 
   -- Given our extracted traversals, it is time to perform the same extraction 
   -- on the functions in the same specialization group.
-  (final_program, final_specs) <- pushTraversals new_program 
+  (final_program, final_specs) <- pushTraversals opts
+                                                 new_program 
                                                  right_bindlocs 
                                                  (extracted_spec_map ++ traversal_specs) 
                                                  extracted_subst_map
@@ -433,9 +459,9 @@ pattern EverywhereM e m md tr t d <- App (App (App (App (App (Var e) (Type m)) m
 
 
 -- | Extracts all traversals from an expression. 
-extractTraversalsFromExpression :: CoreExpr -> BoundVars -> CoreM TEExprR
+extractTraversalsFromExpression :: Opts -> CoreExpr -> BoundVars -> CoreM TEExprR
 {- Important case -}
-extractTraversalsFromExpression (Everywhere scheme f' type_arg d_arg) bound_vars
+extractTraversalsFromExpression opts (Everywhere scheme f' type_arg d_arg) bound_vars
   | isVarEverywhere scheme = do
       -- perform extraction on any other relevant expression
       TEER { teer_result_expr = f
@@ -443,15 +469,15 @@ extractTraversalsFromExpression (Everywhere scheme f' type_arg d_arg) bound_vars
            , teer_subst_map   = subst
            , teer_new_binds   = binds
            , teer_new_traversal_ids = ids
-           } <- extractTraversalsFromExpression f' bound_vars
+           } <- extractTraversalsFromExpression opts f' bound_vars
       -- the core expression we are abstracting over
       let target_expr = App (Var scheme) f
-      extractTraversalsFromTargetExpression target_expr bound_vars type_arg d_arg specs subst binds ids
-extractTraversalsFromExpression (Everything s tr c q t d) bound_vars
+      extractTraversalsFromTargetExpression opts target_expr bound_vars type_arg d_arg specs subst binds ids
+extractTraversalsFromExpression opts (Everything s tr c q t d) bound_vars
   | isVarEverything s = do
       -- extract traversals from sub expressions
-      rec_result1 <- extractTraversalsFromExpression c bound_vars
-      rec_result2 <- extractTraversalsFromExpression q bound_vars
+      rec_result1 <- extractTraversalsFromExpression opts c bound_vars
+      rec_result2 <- extractTraversalsFromExpression opts q bound_vars
       let real_c = teer_result_expr rec_result1
           real_q  = teer_result_expr rec_result2
           spec   = teer_spec_map rec_result1 ++ teer_spec_map rec_result2
@@ -460,8 +486,8 @@ extractTraversalsFromExpression (Everything s tr c q t d) bound_vars
           ids = teer_new_traversal_ids rec_result1 ++ teer_new_traversal_ids rec_result2
       -- the core expression we are abstracting over
       let target_expr = App (App (App (Var s) (Type tr)) real_c) real_q
-      extractTraversalsFromTargetExpression target_expr bound_vars t d spec sub binds ids
-extractTraversalsFromExpression (EverywhereM scheme m m_dict f' type_arg d_arg) bound_vars
+      extractTraversalsFromTargetExpression opts target_expr bound_vars t d spec sub binds ids
+extractTraversalsFromExpression opts (EverywhereM scheme m m_dict f' type_arg d_arg) bound_vars
   | isVarEverywhereM scheme = do
       TEER {
         teer_result_expr = f
@@ -469,52 +495,52 @@ extractTraversalsFromExpression (EverywhereM scheme m m_dict f' type_arg d_arg) 
         , teer_subst_map = sub
         , teer_new_binds = binds
         , teer_new_traversal_ids = ids
-      } <- extractTraversalsFromExpression f' bound_vars
+      } <- extractTraversalsFromExpression opts f' bound_vars
       -- the core expression we are abstracting over
       let target_expr = App (App (App (Var scheme) (Type m)) m_dict) f
-      extractTraversalsFromTargetExpression target_expr bound_vars type_arg d_arg spec sub binds ids
+      extractTraversalsFromTargetExpression opts target_expr bound_vars type_arg d_arg spec sub binds ids
 -- Trivial cases
-extractTraversalsFromExpression (Var i) _      = return $ mkEmptyTEExprR $ Var i
-extractTraversalsFromExpression (Lit l) _      = return $ mkEmptyTEExprR $ Lit l
-extractTraversalsFromExpression (Type t) _     = return $ mkEmptyTEExprR $ Type t
-extractTraversalsFromExpression (Coercion c) _ = return $ mkEmptyTEExprR $ Coercion c
+extractTraversalsFromExpression _ (Var i) _      = return $ mkEmptyTEExprR $ Var i
+extractTraversalsFromExpression _ (Lit l) _      = return $ mkEmptyTEExprR $ Lit l
+extractTraversalsFromExpression _ (Type t) _     = return $ mkEmptyTEExprR $ Type t
+extractTraversalsFromExpression _ (Coercion c) _ = return $ mkEmptyTEExprR $ Coercion c
 -- Simple cases
-extractTraversalsFromExpression (App f x) bound_vars = do
+extractTraversalsFromExpression opts (App f x) bound_vars = do
   TEER { teer_result_expr       = f'
        , teer_spec_map          = spec_map1
        , teer_subst_map         = subst_map1
        , teer_new_binds         = binds1
        , teer_new_traversal_ids = ids1
-       }                                      <- extractTraversalsFromExpression f bound_vars
+       }                                      <- extractTraversalsFromExpression opts f bound_vars
   TEER { teer_result_expr       = x'
        , teer_spec_map          = spec_map2
        , teer_subst_map         = subst_map2
        , teer_new_binds         = binds2
        , teer_new_traversal_ids = ids2
-       }                                      <- extractTraversalsFromExpression x bound_vars
+       }                                      <- extractTraversalsFromExpression opts x bound_vars
   return TEER { teer_result_expr        = App f' x'
               , teer_spec_map           = spec_map1 ++ spec_map2
               , teer_subst_map          = subst_map1 ++ subst_map2
               , teer_new_binds          = binds1 ++ binds2
               , teer_new_traversal_ids  = ids1 ++ ids2 }
 
-extractTraversalsFromExpression (Cast e r) bound_vars = do
-  res <- extractTraversalsFromExpression e bound_vars
+extractTraversalsFromExpression opts (Cast e r) bound_vars = do
+  res <- extractTraversalsFromExpression opts e bound_vars
   let e' = teer_result_expr res
   return res { teer_result_expr = Cast e' r }
 
-extractTraversalsFromExpression (Tick c e) bound_vars = do
-  res <- extractTraversalsFromExpression e bound_vars
+extractTraversalsFromExpression opts (Tick c e) bound_vars = do
+  res <- extractTraversalsFromExpression opts e bound_vars
   let e' = teer_result_expr res
   return res { teer_result_expr = Tick c e' }
 
 -- More important cases
-extractTraversalsFromExpression (Lam b e) bound_vars = do
-  res <- extractTraversalsFromExpression e (b : bound_vars) -- include 'b' as a bound variable
+extractTraversalsFromExpression opts (Lam b e) bound_vars = do
+  res <- extractTraversalsFromExpression opts e (b : bound_vars) -- include 'b' as a bound variable
   let e' = teer_result_expr res
   return res { teer_result_expr = Lam b e' }
 
-extractTraversalsFromExpression (Let b e) bound_vars = do
+extractTraversalsFromExpression opts (Let b e) bound_vars = do
     let more_vars      = bindersOf b -- let bindings introduce more variables to bind over
         new_bound_vars = more_vars ++ bound_vars
     (b', spec, subst, binds, ids) <- aux b new_bound_vars
@@ -523,7 +549,7 @@ extractTraversalsFromExpression (Let b e) bound_vars = do
          , teer_subst_map         = subst'
          , teer_new_binds         = binds'
          , teer_new_traversal_ids = ids'
-         }                                  <- extractTraversalsFromExpression e new_bound_vars
+         }                                  <- extractTraversalsFromExpression opts e new_bound_vars
     return TEER { teer_result_expr       = Let b' e'
                 , teer_spec_map          = spec ++ spec'
                 , teer_subst_map         = subst ++ subst'
@@ -537,12 +563,14 @@ extractTraversalsFromExpression (Let b e) bound_vars = do
                , teer_subst_map         = subst'
                , teer_new_binds         = binds'
                , teer_new_traversal_ids = ids'
-               }                                  <- extractTraversalsFromExpression bind_expr bvs
+               }                                  <- extractTraversalsFromExpression opts bind_expr bvs
           return (NonRec bind_name e', spec', subst', binds', ids')
         aux (Rec ls) bvs = do
           (ls', spec', subst', pgm', ids') <- bux ls bvs
           return (Rec ls', spec', subst', pgm', ids')
-        bux :: [(Var, Expr Var)] -> [Var] -> CoreM ([(Var, Expr Var)], SpecializationMap, SubstitutionMap, [CoreBind], [Var])
+        bux :: [(Var, Expr Var)] 
+            -> [Var] 
+            -> CoreM ([(Var, Expr Var)], SpecializationMap, SubstitutionMap, [CoreBind], [Var])
         bux [] _ = return ([], [], [], [], [])
         bux ((lhs, rhs) : xs) bvs = do
           (xs', spec1, subst1, binds1, ids1) <- bux xs bvs
@@ -551,15 +579,15 @@ extractTraversalsFromExpression (Let b e) bound_vars = do
                , teer_subst_map = subst2
                , teer_new_binds = binds2
                , teer_new_traversal_ids = ids2
-               }                               <- extractTraversalsFromExpression rhs bvs
+               }                               <- extractTraversalsFromExpression opts rhs bvs
           return ((lhs, rhs') : xs', spec1 ++ spec2, subst1 ++ subst2, binds1 ++ binds2, ids1 ++ ids2)
-extractTraversalsFromExpression (Case e var t alts) bound_vars = do
+extractTraversalsFromExpression opts (Case e var t alts) bound_vars = do
     TEER { teer_result_expr = e'
          , teer_spec_map = spec1
          , teer_subst_map = subst1
          , teer_new_binds = binds1
          , teer_new_traversal_ids = ids1
-         }                                <- extractTraversalsFromExpression e bound_vars
+         }                                <- extractTraversalsFromExpression opts e bound_vars
     let new_bound_vars = var : bound_vars
     (alts', spec2, subst2, binds2, ids2) <- aux alts new_bound_vars
     return TEER { teer_result_expr       = Case e' var t alts'
@@ -577,40 +605,60 @@ extractTraversalsFromExpression (Case e var t alts) bound_vars = do
                , teer_subst_map = subst2
                , teer_new_binds = binds2
                , teer_new_traversal_ids = ids2
-               }                                <- extractTraversalsFromExpression expr new_bound_vars
+               }                                <- extractTraversalsFromExpression opts expr new_bound_vars
           return (Alt alt_con names e' : alts', spec2 ++ spec1, subst2 ++ subst1, binds1 ++ binds2, ids1 ++ ids2)
 
 -- | Extract the traversal from a given target expression
-extractTraversalsFromTargetExpression :: CoreExpr -> BoundVars -> Type -> CoreExpr -> SpecializationMap -> SubstitutionMap -> [CoreBind] -> [Id] -> CoreM TEExprR
-extractTraversalsFromTargetExpression target_expr bound_vars type_arg dict_arg spec_map subst_map new_binds new_ids 
-  = do  -- obtain the occurring bound variables of this expression;
+extractTraversalsFromTargetExpression :: Opts -> CoreExpr -> BoundVars -> Type -> CoreExpr -> SpecializationMap -> SubstitutionMap -> [CoreBind] -> [Id] -> CoreM TEExprR
+extractTraversalsFromTargetExpression opts target_expr bound_vars type_arg dict_arg spec_map subst_map new_binds new_ids 
+  = do  prtSIf (show_traversal_extraction opts) $ info "Traversal extraction: target expression found"
+        prtIf (show_traversal_extraction opts) target_expr
+        -- obtain the occurring bound variables of this expression;
         -- this is so that we can wrap all the bound variables
         -- in lambdas
         let occurring_bound_vars = getOccurringVariables target_expr bound_vars
+        prtSIf (show_traversal_extraction opts) $ info "Traversal extraction: expression has following bound variables to be abstracted over"
+        prtIf (show_traversal_extraction opts) occurring_bound_vars
+        
         -- now we get the type of this expression; we need this so that 
         -- we can create the traversal function type.
         let target_expr_type = exprType target_expr
+        prtSIf (show_traversal_extraction opts) $ info "Traversal extraction: type of target expression"
+        prtIf (show_traversal_extraction opts) target_expr_type
+
         -- now we create the type of the traversal function type
         let type_of_traversal = createTraversalFunctionType target_expr_type occurring_bound_vars
+        prtSIf (show_traversal_extraction opts) $ success "Traversal extraction: created traversal function's type"
+        prtIf (show_traversal_extraction opts) type_of_traversal
         -- now we create the RHS of the traversal; i.e., wrap the core expression around lambdas
         -- of the occuring bound variables. We can also make the substitution template at 
         -- the same time.
         (traversal_rhs, template) <- mkTraversalRHSAndTemplate target_expr occurring_bound_vars type_of_traversal
         -- now make the name of the traversal. we must also give it its type.
         traversal_lhs <- mkTraversalLHS type_of_traversal
+        
         -- now we can make the actual bind. it is for sure recursive, especially once we
         -- eliminate the scheme.
         let new_bind = Rec [(traversal_lhs, traversal_rhs)]
+        prtSIf (show_traversal_extraction opts) $ success "Traversal extraction: successfully created traversal function"
+        prtIf (show_traversal_extraction opts) new_bind
+        prtSIf (show_traversal_extraction opts) $ success "Traversal extraction: successfully created substitution template"
+        prtIf (show_traversal_extraction opts) template
         -- now the original expression needs to be replaced with an invocation
         -- of the newly created traversal function.
         let replaced_expr = createReplacedTraversal traversal_lhs type_arg dict_arg occurring_bound_vars
+        prtSIf (show_traversal_extraction opts) $ success "Traversal extraction: replacing original expression with this new expression"
+        prtIf (show_traversal_extraction opts) replaced_expr
+
         -- we also need to register the template and resulting id to replace with,
         -- in the substitution map
         let subst_entry = (template, traversal_lhs)
         -- if these arguments are specializable, add them to the specialization map
-        let specs = if isTypeFullyConcrete type_arg && null (getOccurringVariables dict_arg bound_vars)
-                    then pushEntryToMapOfList traversal_lhs (type_arg, dict_arg) spec_map
-                    else spec_map
+        specs <- if isTypeFullyConcrete type_arg && null (getOccurringVariables dict_arg bound_vars)
+                 then do prtSIf (show_traversal_extraction opts) $ success "Traversal extraction: found type to specialize traversal on"
+                         prtIf (show_traversal_extraction opts) (type_arg, dict_arg)
+                         return $ pushEntryToMapOfList traversal_lhs (type_arg, dict_arg) spec_map
+                    else return spec_map
         return $ TEER { teer_result_expr = replaced_expr
                       , teer_spec_map    = specs
                       , teer_subst_map   = subst_entry : subst_map
@@ -624,16 +672,17 @@ pushEntryToMapOfList k v ((lhs, rhs) : entries)
   | k == lhs = (lhs, rhs) : entries
   | otherwise = (lhs, rhs) : pushEntryToMapOfList k v entries
 
-pushTraversals :: CoreProgram 
+pushTraversals :: Opts
+               -> CoreProgram 
                -> [Id] 
                -> SpecializationMap 
                -> SubstitutionMap 
                -> CoreM (CoreProgram, SpecializationMap)
-pushTraversals pgm [] spec_map _ = return (pgm, spec_map)
-pushTraversals pgm' (id' : ids) spec_map' subst_map = do
-  (pgm, spec_map) <- pushTraversals pgm' ids spec_map' subst_map
+pushTraversals _ pgm [] spec_map _ = return (pgm, spec_map)
+pushTraversals opts pgm' (id' : ids) spec_map' subst_map = do
+  (pgm, spec_map) <- pushTraversals opts pgm' ids spec_map' subst_map
   let rhs = lookupTopLevelRHS id' pgm
-  (rhs', specs) <- pushTraversalsIntoExpression rhs subst_map []
+  (rhs', specs) <- pushTraversalsIntoExpression opts rhs subst_map []
   let new_pgm = updateBind id' rhs' pgm
   return (new_pgm, specs ++ spec_map)
 
@@ -654,8 +703,6 @@ createTraversalFunctionType target_expr_type bound_vars =
                         in  aux fn_type vs
           | otherwise = let fn_type = mkVisFunTy Many (exprType (Var v)) acc
                         in aux fn_type vs
-        -- aux acc (v : vs) = let fn_type = mkVisFunTy Many (exprType (Var v)) acc
-        --                    in  aux fn_type vs
 
 
 performSubstitution :: Expr Var -> (Expr Var, Var) -> CoreM (Maybe Var)
@@ -674,103 +721,145 @@ tryAllSubstitutions candidate (x : xs) = do
     y -> return y
 
 
-pushTraversalsIntoExpression :: Expr Var -> SubstitutionMap -> [Var] -> CoreM (Expr Var, SpecializationMap)
-pushTraversalsIntoExpression (App (App (App (Var combinator) transformation) (Type arg_to_combinator)) dictionary_arg_to_combinator) subst_map bound_vars
-  | isVarEverywhere combinator = do
+pushTraversalsIntoTargetExpression :: Opts -> Expr Var -> BoundVars -> Type -> CoreExpr -> SubstitutionMap -> SpecializationMap -> CoreM (Expr Var, SpecializationMap)
+pushTraversalsIntoTargetExpression opts target_expr bound_vars type_arg dict_arg subst specs
+  = do  prtSIf (show_traversal_extraction opts) $ info "Traversal extraction: found expression to substitute"
+        prtIf (show_traversal_extraction opts) target_expr
+
+        -- find the occurring bound variables of the target expression for us to abstract over
+        let bound_vars_of_expression = getOccurringVariables target_expr bound_vars
+        prtSIf (show_traversal_extraction opts) $ info "Traversal extraction: expression has following bound variables to be abstracted over"
+        prtIf (show_traversal_extraction opts) bound_vars_of_expression
+        -- get the type of the target expression. this is so taht we can create the template
+        let type_of_target_expr = exprType target_expr
+        prtSIf (show_traversal_extraction opts) $ info "Traversal extraction: type of target expression"
+        prtIf (show_traversal_extraction opts) type_of_target_expr
+
+        let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
+        (_, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
+        prtSIf (show_traversal_extraction opts) $ info "Traversal extraction: target expression will use following substitution template"
+        prtIf (show_traversal_extraction opts) template_left
+    
+        mTraversal <- tryAllSubstitutions template_left subst
+        case mTraversal of 
+          Just traversal -> do
+            -- create the new expression
+            let replacement = createReplacedTraversal traversal type_arg dict_arg bound_vars_of_expression
+            prtSIf (show_traversal_extraction opts) $ success "Traversal extraction: substituting target expression with following expression"
+            prtIf (show_traversal_extraction opts) replacement
+            new_spec <- if isTypeFullyConcrete type_arg && null (getOccurringVariables dict_arg bound_vars) 
+                        then do prtSIf (show_traversal_extraction opts) $ success "Traversal extraction: found traversal specialization"
+                                prtIf (show_traversal_extraction opts) (type_arg, dict_arg)
+                                return $ pushEntryToMapOfList traversal (type_arg, dict_arg) specs 
+                        else return specs
+            return (replacement, new_spec)
+                
+          Nothing -> do prtSIf (show_traversal_extraction opts) $ warn "Traversal extraction: did not find suitable subtitution!"
+                        let actual_expr = App (App target_expr (Type type_arg)) dict_arg
+                        return (actual_expr, specs)
+
+pushTraversalsIntoExpression :: Opts -> Expr Var -> SubstitutionMap -> [Var] -> CoreM (Expr Var, SpecializationMap)
+pushTraversalsIntoExpression opts (Everywhere scheme f type_arg dict_arg) subst_map bound_vars
+  | isVarEverywhere scheme = do
       -- perform push on any other relevant expression
-      (real_transformation, spec1) <- pushTraversalsIntoExpression transformation subst_map bound_vars
-      let target_expr = App (Var combinator) real_transformation
-      let bound_vars_of_expression = getOccurringVariables real_transformation bound_vars
-      let type_of_target_expr = exprType target_expr
-      let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
-      (_, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
-      mTraversal <- tryAllSubstitutions template_left subst_map
-      case mTraversal of 
-        Just traversal ->
-          -- create the new expression
-          let replacement = createReplacedTraversal traversal arg_to_combinator dictionary_arg_to_combinator bound_vars_of_expression
-              new_spec = if isTypeFullyConcrete arg_to_combinator && null (getOccurringVariables dictionary_arg_to_combinator bound_vars) then pushEntryToMapOfList traversal (arg_to_combinator, dictionary_arg_to_combinator) spec1 else spec1
-          in return (replacement, new_spec)
-              
-        Nothing -> let actual_expr = App (App (App (Var combinator) real_transformation) (Type arg_to_combinator)) dictionary_arg_to_combinator
-                   in return (actual_expr, spec1)
+      (f', specs) <- pushTraversalsIntoExpression opts f subst_map bound_vars
+      let target_expr = App (Var scheme) f'
+      pushTraversalsIntoTargetExpression opts target_expr bound_vars type_arg dict_arg subst_map specs
+      -- let bound_vars_of_expression = getOccurringVariables real_transformation bound_vars
+      -- let type_of_target_expr = exprType target_expr
+      -- let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
+      -- (_, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
+      -- mTraversal <- tryAllSubstitutions template_left subst_map
+      -- case mTraversal of 
+      --   Just traversal ->
+      --     -- create the new expression
+      --     let replacement = createReplacedTraversal traversal arg_to_combinator dictionary_arg_to_combinator bound_vars_of_expression
+      --         new_spec = if isTypeFullyConcrete arg_to_combinator && null (getOccurringVariables dictionary_arg_to_combinator bound_vars) then pushEntryToMapOfList traversal (arg_to_combinator, dictionary_arg_to_combinator) spec1 else spec1
+      --     in return (replacement, new_spec)
+      --         
+      --   Nothing -> let actual_expr = App (App target_expr (Type arg_to_combinator)) dictionary_arg_to_combinator
+      --              in return (actual_expr, spec1)
 -- pushTraversalsIntoExpression (App (App (App (Var combinator) transformation) (Type arg_to_combinator)) dictionary_arg_to_combinator) subst_map bound_vars
-pushTraversalsIntoExpression (Everything combinator tr c q t d) subst_map bound_vars
-  | isVarEverything combinator = do
+pushTraversalsIntoExpression opts (Everything scheme tr c q t d) subst_map bound_vars
+  | isVarEverything scheme = do
       -- perform push on any other relevant expression
-      (real_c, spec_c) <- pushTraversalsIntoExpression c subst_map bound_vars
-      (real_q, spec_q) <- pushTraversalsIntoExpression q subst_map bound_vars
+      (real_c, spec_c) <- pushTraversalsIntoExpression opts c subst_map bound_vars
+      (real_q, spec_q) <- pushTraversalsIntoExpression opts q subst_map bound_vars
       let spec1 = spec_c ++ spec_q
-      let target_expr = App (App (App (Var combinator) (Type tr)) real_c) real_q
+      let target_expr = App (App (App (Var scheme) (Type tr)) real_c) real_q
+      pushTraversalsIntoTargetExpression opts target_expr bound_vars t d subst_map spec1
       -- (real_transformation, spec1) <- pushTraversalsIntoExpression transformation subst_map bound_vars
       -- let target_expr = App (Var combinator) real_transformation
-      let bound_vars_of_expression = getOccurringVariables target_expr bound_vars
-      let type_of_target_expr = exprType target_expr
-      let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
-      (_, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
-      -- prt template_left
-      mTraversal <- tryAllSubstitutions template_left subst_map
-      case mTraversal of 
-        Just traversal ->
-          -- create the new expression
-          let replacement = createReplacedTraversal traversal t d bound_vars_of_expression
-              new_spec = if isTypeFullyConcrete t && null (getOccurringVariables d bound_vars) then pushEntryToMapOfList traversal (t, d) spec1 else spec1
-          in return (replacement, new_spec)
-              
-        Nothing -> let actual_expr = App (App (target_expr) (Type t)) d
-                   in return (actual_expr, spec1)
-pushTraversalsIntoExpression (EverywhereM combinator tr c q t d) subst_map bound_vars
-  | isVarEverything combinator = do
+      -- let bound_vars_of_expression = getOccurringVariables target_expr bound_vars
+      -- let type_of_target_expr = exprType target_expr
+      -- let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
+      -- (_, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
+      -- -- prt template_left
+      -- mTraversal <- tryAllSubstitutions template_left subst_map
+      -- case mTraversal of 
+      --   Just traversal ->
+      --     -- create the new expression
+      --     let replacement = createReplacedTraversal traversal t d bound_vars_of_expression
+      --         new_spec = if isTypeFullyConcrete t && null (getOccurringVariables d bound_vars) then pushEntryToMapOfList traversal (t, d) spec1 else spec1
+      --     in return (replacement, new_spec)
+      --         
+      --   Nothing -> let actual_expr = App (App (target_expr) (Type t)) d
+      --              in return (actual_expr, spec1)
+pushTraversalsIntoExpression opts (EverywhereM scheme m md tr t d) subst_map bound_vars
+  | isVarEverywhereM scheme = do
       -- perform push on any other relevant expression
-      (real_c, spec_c) <- pushTraversalsIntoExpression c subst_map bound_vars
-      (real_q, spec_q) <- pushTraversalsIntoExpression q subst_map bound_vars
-      let spec1 = spec_c ++ spec_q
-      let target_expr = App (App (App (Var combinator) (Type tr)) real_c) real_q
-      -- (real_transformation, spec1) <- pushTraversalsIntoExpression transformation subst_map bound_vars
-      -- let target_expr = App (Var combinator) real_transformation
-      let bound_vars_of_expression = getOccurringVariables target_expr bound_vars
-      let type_of_target_expr = exprType target_expr
-      let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
-      (_, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
-      -- prt template_left
-      mTraversal <- tryAllSubstitutions template_left subst_map
-      case mTraversal of 
-        Just traversal ->
-          -- create the new expression
-          let replacement = createReplacedTraversal traversal t d bound_vars_of_expression
-              new_spec = if isTypeFullyConcrete t && null (getOccurringVariables d bound_vars) then pushEntryToMapOfList traversal (t, d) spec1 else spec1
-          in return (replacement, new_spec)
-              
-        Nothing -> let actual_expr = App (App (target_expr) (Type t)) d
-                   in return (actual_expr, spec1)
-pushTraversalsIntoExpression (Var i) _ _ = return (Var i, [])
-pushTraversalsIntoExpression (Lit l) _ _ = return (Lit l, [])
-pushTraversalsIntoExpression (Type t) _ _ = return (Type t, [])
-pushTraversalsIntoExpression (Coercion c) _ _ = return (Coercion c, [])
+      (tr', specs) <- pushTraversalsIntoExpression opts tr subst_map bound_vars
+      let target_expr = App (App (App (Var scheme) (Type m)) md) tr'
+      pushTraversalsIntoTargetExpression opts target_expr bound_vars t d subst_map specs
+      -- (real_c, spec_c) <- pushTraversalsIntoExpression c subst_map bound_vars
+      -- (real_q, spec_q) <- pushTraversalsIntoExpression q subst_map bound_vars
+      -- let spec1 = spec_c ++ spec_q
+      -- let target_expr = App (App (App (Var combinator) (Type tr)) real_c) real_q
+      -- -- (real_transformation, spec1) <- pushTraversalsIntoExpression transformation subst_map bound_vars
+      -- -- let target_expr = App (Var combinator) real_transformation
+      -- let bound_vars_of_expression = getOccurringVariables target_expr bound_vars
+      -- let type_of_target_expr = exprType target_expr
+      -- let type_of_traversal = createTraversalFunctionType type_of_target_expr bound_vars_of_expression
+      -- (_, template_left) <- mkTraversalRHSAndTemplate target_expr bound_vars_of_expression type_of_traversal
+      -- -- prt template_left
+      -- mTraversal <- tryAllSubstitutions template_left subst_map
+      -- case mTraversal of 
+      --   Just traversal ->
+      --     -- create the new expression
+      --     let replacement = createReplacedTraversal traversal t d bound_vars_of_expression
+      --         new_spec = if isTypeFullyConcrete t && null (getOccurringVariables d bound_vars) then pushEntryToMapOfList traversal (t, d) spec1 else spec1
+      --     in return (replacement, new_spec)
+      --         
+      --   Nothing -> let actual_expr = App (App (target_expr) (Type t)) d
+      --              in return (actual_expr, spec1)
+pushTraversalsIntoExpression _ (Var i) _ _ = return (Var i, [])
+pushTraversalsIntoExpression _ (Lit l) _ _ = return (Lit l, [])
+pushTraversalsIntoExpression _ (Type t) _ _ = return (Type t, [])
+pushTraversalsIntoExpression _ (Coercion c) _ _ = return (Coercion c, [])
 {- Simple cases -}
-pushTraversalsIntoExpression (App f x) subst_map bound_vars = do
-  (f', spec_map1) <- pushTraversalsIntoExpression f subst_map bound_vars
-  (x', spec_map2) <- pushTraversalsIntoExpression x subst_map bound_vars
+pushTraversalsIntoExpression opts (App f x) subst_map bound_vars = do
+  (f', spec_map1) <- pushTraversalsIntoExpression opts f subst_map bound_vars
+  (x', spec_map2) <- pushTraversalsIntoExpression opts x subst_map bound_vars
   return (App f' x', spec_map1 ++ spec_map2)
-pushTraversalsIntoExpression (Cast e r) subst_map bound_vars = do
-  (e', spec) <- pushTraversalsIntoExpression e subst_map bound_vars
+pushTraversalsIntoExpression opts (Cast e r) subst_map bound_vars = do
+  (e', spec) <- pushTraversalsIntoExpression opts e subst_map bound_vars
   return (Cast e' r, spec)
-pushTraversalsIntoExpression (Tick c e) subst_map bound_vars = do
-  (e', spec) <- pushTraversalsIntoExpression e subst_map bound_vars
+pushTraversalsIntoExpression opts (Tick c e) subst_map bound_vars = do
+  (e', spec) <- pushTraversalsIntoExpression opts e subst_map bound_vars
   return (Tick c e', spec)
 {- More important cases -}
-pushTraversalsIntoExpression (Lam b e) subst_map bound_vars = do
-  (e', spec) <- pushTraversalsIntoExpression e subst_map (b : bound_vars) -- include the binder b in the bound variables
+pushTraversalsIntoExpression opts (Lam b e) subst_map bound_vars = do
+  (e', spec) <- pushTraversalsIntoExpression opts e subst_map (b : bound_vars) -- include the binder b in the bound variables
   return (Lam b e', spec)
-pushTraversalsIntoExpression (Let b e) subst_map bound_vars = do
+pushTraversalsIntoExpression opts (Let b e) subst_map bound_vars = do
     let more_vars = binders b -- let bindings introduce more variables to bind over
         new_bound_vars = more_vars ++ bound_vars
     (b', spec) <- aux b new_bound_vars
-    (e', spec') <- pushTraversalsIntoExpression e subst_map new_bound_vars
+    (e', spec') <- pushTraversalsIntoExpression opts e subst_map new_bound_vars
     return (Let b' e', spec ++ spec')
   where aux :: Bind Var -> [Var] -> CoreM (Bind Var, SpecializationMap)
         aux (NonRec bind_name bind_expr) bvs = do
-          (e', spec') <- pushTraversalsIntoExpression bind_expr subst_map bvs
+          (e', spec') <- pushTraversalsIntoExpression opts bind_expr subst_map bvs
           return (NonRec bind_name e', spec')
         aux (Rec ls) bvs = do
           (ls', spec') <- bux ls bvs
@@ -779,13 +868,13 @@ pushTraversalsIntoExpression (Let b e) subst_map bound_vars = do
         bux [] _ = return ([], [])
         bux ((lhs, rhs) : xs) bvs = do
           (res1, res2) <- bux xs bvs
-          (res4, res5) <- pushTraversalsIntoExpression rhs subst_map bvs
+          (res4, res5) <- pushTraversalsIntoExpression opts rhs subst_map bvs
           return ((lhs, res4) : res1, res5 ++ res2)
         binders :: Bind Var -> [Var]
         binders (NonRec lhs _) = [lhs]
         binders (Rec ls) = map fst ls
-pushTraversalsIntoExpression (Case e var t alts) subst_map bound_vars = do
-    (e', spec1) <- pushTraversalsIntoExpression e subst_map bound_vars
+pushTraversalsIntoExpression opts (Case e var t alts) subst_map bound_vars = do
+    (e', spec1) <- pushTraversalsIntoExpression opts e subst_map bound_vars
     let new_bound_vars = var : bound_vars
     (alts', spec2) <- aux alts new_bound_vars
     return (Case e' var t alts', spec1 ++ spec2)
@@ -794,7 +883,7 @@ pushTraversalsIntoExpression (Case e var t alts) subst_map bound_vars = do
         aux (Alt alt_con names expr : xs) bvs = do
           (alts', spec1) <- aux xs bvs
           let new_bound_vars = names ++ bvs
-          (e', spec2) <- pushTraversalsIntoExpression expr subst_map new_bound_vars
+          (e', spec2) <- pushTraversalsIntoExpression opts expr subst_map new_bound_vars
           return (Alt alt_con names e' : alts', spec2 ++ spec1)
 
 
@@ -809,8 +898,8 @@ mkUniqTypeVar name = do
 
 mkTraversalRHSAndTemplate :: Expr Var -> [Var] -> Type -> CoreM (Expr Var, Expr Var)
 mkTraversalRHSAndTemplate inner_expr bs t = do
-    let (original_type_variable, rhs) = splitForAllTyVars t 
-        (_many, data_arg, inner_type) = splitFunTy rhs
+    let (_, rhs) = splitForAllTyVars t 
+        (_many, data_arg, _) = splitFunTy rhs
     -- create the type variable
     ty_var_var <- mkUniqTypeVar "a"
     let type_variable = mkTyVarTy ty_var_var
@@ -1012,8 +1101,6 @@ instance NameShow (Alt Var) where
 class TypeShow a where
   showAllTypes :: a -> CoreM ()
 
-prt :: Outputable a => a -> CoreM()
-prt = putMsg . ppr
 
 instance TypeShow CoreExpr where
   showAllTypes :: CoreExpr -> CoreM ()
@@ -1360,8 +1447,7 @@ replaceProgramWithSpecs :: CoreProgram -> [(Id, [(Type, Id)])] -> CoreM CoreProg
 replaceProgramWithSpecs pgm [] = return pgm
 replaceProgramWithSpecs pgm' ((lhs, specs) : ls) = do
   pgm <- replaceProgramWithSpecs pgm' ls
-  pgm2 <- replaceWithSpecializations lhs specs pgm
-  return pgm2
+  replaceWithSpecializations lhs specs pgm
 
   
 replaceExprWithSpec' :: Id -> [(Type, Id)] -> CoreExpr -> CoreM CoreExpr

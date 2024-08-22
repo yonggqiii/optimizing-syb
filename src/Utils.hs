@@ -28,10 +28,18 @@ parseCommandLineOpts (x : xs)
           "--show-simple" -> return opts { show_simple = True }
           "--show-function-map" -> return opts { show_fn_map = True }
           "--show-traversal-extraction" -> return opts { show_traversal_extraction = True }
-          "--show-go-elim" -> return opts { show_go_elim = True }
+          "--show-scheme-elim" -> return opts { show_go_elim = True }
           "--show-gmap-elim" -> return opts { show_gmap_elim = True }
           "--show-spec" -> return opts { show_spec = True }
           "--show-type-eval" -> return opts { show_type_eval = True }
+          "--verbose" -> return Opts { show_simple = True
+                                      , show_fn_map = True
+                                      , show_traversal_extraction = True
+                                      , show_go_elim = True
+                                      , show_gmap_elim = True
+                                      , show_spec = True
+                                      , show_type_eval = True
+                                      }
           _ -> putMsgS (warn ("Unknown option for OptimizingSYB: " ++ x)) >> return opts
 
 box :: Int -> String -> PprColour -> String
@@ -68,5 +76,5 @@ prt = putMsg . ppr
 prtIf :: forall a. Outputable a => Bool -> a -> CoreM ()
 prtIf b x = when b $ prt x 
 
-putMsgSIf :: Bool -> String -> CoreM ()
-putMsgSIf b x = when b $ putMsgS x
+prtSIf :: Bool -> String -> CoreM ()
+prtSIf b x = when b $ putMsgS x

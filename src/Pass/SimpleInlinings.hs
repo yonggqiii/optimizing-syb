@@ -24,7 +24,7 @@ simpleInlinings opts = CoreDoPluginPass "Simple Inlinings" (simpleInlineModGuts 
 prt :: Outputable a => Opts -> a -> CoreM ()
 prt opts = prtIf (show_simple opts)
 prtS :: Opts -> String -> CoreM ()
-prtS opts = putMsgSIf (show_simple opts)
+prtS opts = prtSIf (show_simple opts)
 
 
 simpleInlineModGuts :: Opts ->  CorePluginPass
@@ -40,9 +40,9 @@ inlineCoreBind opts (NonRec b e) = do
   e'' <- fullTransformM (inlineCoreExpr opts) e
   let e' = letInline e''
   when (deBruijnize e' /= deBruijnize e'')
-    $ do prtS opts (info "Target expression found")
+    $ do prtS opts (info "Simple inlinings: Let-inlining performed on the following expression")
          prt opts e''
-         prtS opts (success "New expression")
+         prtS opts (success "Simple inlinings: New expression")
          prt opts e'
   return $ NonRec b e'
 inlineCoreBind opts (Rec ls) = do
@@ -55,19 +55,19 @@ inlineCoreBind opts (Rec ls) = do
           e'' <- fullTransformM (inlineCoreExpr opts) e
           let e' = letInline e''
           when (deBruijnize e' /= deBruijnize e'')
-            $ do prtS opts (info "Target expression found")
+            $ do prtS opts (info "Simple inlinings: Let-inlining performed on the following expression")
                  prt opts e''
-                 prtS opts (success "New expression")
+                 prtS opts (success "Simple inlinings: New expression")
                  prt opts e'
           return $ (b, e') : xs'
 
 inlineCoreExpr :: Opts -> Expr Var -> CoreM (Expr Var)
 inlineCoreExpr opts e@(App (App (App (App (App (Var dollar) (Type _)) (Type _)) (Type _)) f) x)
   | nameStableString (varName dollar) == "$base$GHC.Base$$" = do
-      prtS opts $ info "Target expression found"
+      prtS opts $ info "Simple inlinings: Target expression found"
       prt opts e
       let res = App f x
-      prtS opts $ success "New expression"
+      prtS opts $ success "Simple inlinings: New expression"
       prt opts res
       return res
 inlineCoreExpr _ x = return x

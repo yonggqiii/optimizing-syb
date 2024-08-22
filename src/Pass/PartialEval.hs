@@ -38,7 +38,7 @@ specByPartialEvaluation opts = CoreDoPluginPass "Specialization by Partial Evalu
 prt :: Outputable a => Opts -> a -> CoreM ()
 prt opts = prtIf (show_type_eval opts)
 prtS :: Opts -> String -> CoreM ()
-prtS opts = putMsgSIf (show_type_eval opts)
+prtS opts = prtSIf (show_type_eval opts)
 
 -- | Performs specialization by partial evaluation on 'ModGuts'
 partialEvalModGuts :: Opts -> CorePluginPass
