@@ -30,32 +30,28 @@ import Data.Generics
 --
 -- data List a = EmptyList | Cons a (List a)
 --   deriving (Typeable, Show, Data)
---
---
+
+
 -- incS :: Float -> Salary -> Salary
 -- incS k (S s) = S (s * (1 + k))
---
--- incNum :: Float -> Int -> Int -> Int
--- incNum a b c = floor a + b + c
-
-incSM :: Float -> Salary -> IO Salary
-incSM k (S s) = do
-  let new_s = s * (1 + k)
-  putStrLn $ "Increasing salary from " ++ (show s) ++ " to " ++ (show new_s)
-  return $ S new_s
-
-increaseM :: Float -> Company -> IO Company
-increaseM k = everywhereM $ mkM (incSM k)
-
 -- increase :: Float -> Company -> Company
 -- increase :: Data a => Float -> a -> a
 -- increase k = everywhere' $ mkT (incS k)
 -- {-# SPECIALIZE increase :: Data a => Float -> [a] -> [a] #-}
--- getS :: Salary -> Float
--- getS (S s) = s
+-- incSM :: Float -> Salary -> IO Salary
+-- incSM k (S s) = do
+--   let new_s = s * (1 + k)
+--   putStrLn $ "Increasing salary from " ++ (show s) ++ " to " ++ (show new_s)
+--   return $ S new_s
+--
+-- increaseM :: Float -> Company -> IO Company
+-- increaseM k = everywhereM $ mkM (incSM k)
 
--- totalSalary :: Company -> Float
--- totalSalary = everything (+) $ mkQ 0 getS
+getS :: Salary -> Float
+getS (S s) = s
+
+totalSalary :: Company -> Float
+totalSalary = everything (+) $ mkQ 0 getS
 
 -- anotherIncrease :: Data a => Float -> a -> a
 -- anotherIncrease k =

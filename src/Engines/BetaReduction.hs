@@ -47,20 +47,20 @@ betaReducerM (App (Cast (Lam var rhs) c) (Type x)) = do
   -- putMsg $ ppr $ newCast
   return newCast
 betaReducerM (App (Cast (Lam var rhs) c) x) = do
-  putMsgS "BR on COERCION"
-  putMsg $ ppr (App (Cast (Lam var rhs) c) x)
-  putMsgS "COERCION"
-  putMsg $ ppr  c
-  putMsgS "COERCION TYPE"
-  putMsg $ ppr  $ coercionType c
-  putMsgS "COERCION KIND"
-  putMsg $ ppr $ coercionKind c
-  putMsgS "SPLIT FUNCO"
+  -- putMsgS "BR on COERCION"
+  -- putMsg $ ppr (App (Cast (Lam var rhs) c) x)
+  -- putMsgS "COERCION"
+  -- putMsg $ ppr  c
+  -- putMsgS "COERCION TYPE"
+  -- putMsg $ ppr  $ coercionType c
+  -- putMsgS "COERCION KIND"
+  -- putMsg $ ppr $ coercionKind c
+  -- putMsgS "SPLIT FUNCO"
   let Just (e, f) = splitFunCo_maybe c
-  putMsgS "E COERCION"
-  putMsg $ ppr $ e
-  putMsgS "F COERCION"
-  putMsg $ ppr $ f
+  -- putMsgS "E COERCION"
+  -- putMsg $ ppr $ e
+  -- putMsgS "F COERCION"
+  -- putMsg $ ppr $ f
   let newTerm = substitute var x rhs
   return $ Cast newTerm f
   -- return $ App (Cast (Lam var rhs) c) x

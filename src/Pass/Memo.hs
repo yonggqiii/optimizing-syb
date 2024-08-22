@@ -71,9 +71,9 @@ memoSpecModGuts mod_guts = do
   putMsgS "Running phase: Memoizing Specialization"
   let all_binds    = mg_binds mod_guts
       function_map = initFunctionMap all_binds
-  TER { ter_program = traversal_extracted_program
+  TER { ter_program         = traversal_extracted_program
       , ter_traversal_specs = spec_map
-      , ter_traversal_ids = traversal_ids
+      , ter_traversal_ids   = traversal_ids
       }                                           <- extractTraversals all_binds function_map
   new_program <- goElim traversal_extracted_program traversal_ids
   -- look through spec list for dictionaries that are found in this program
@@ -982,7 +982,8 @@ goElimTraversal lhs rhs = do
   beta_reduced_let_inlined_go <- betaReduceCompletelyM let_inlined_unfolding_with_replaced_go
   let rhs' = substitute scheme beta_reduced_let_inlined_go rhs
   -- let rhs'' = betaReduceCompletely rhs' deBruijnize
-  betaReduceCompletelyM rhs'
+  betaReduceCompletelyM rhs' 
+  
 
 class NameShow a where
   showAllNames :: a -> CoreM ()
@@ -1180,7 +1181,7 @@ isSpecCompleted t ls = let types = map fst ls
 
 optimizeSpecialization :: Id -> CoreExpr -> CoreM (CoreExpr, [(Type, CoreExpr)])
 optimizeSpecialization gen_traversal_id spec_rhs = do
-  prt spec_rhs
+  -- prt spec_rhs
   -- rhs' <- genericElimination spec_rhs
   rhs' <- fullTransformM gmapTEliminator spec_rhs --transform gmapTDestructurer gmapTTransformer spec_rhs
   -- let rhs = betaReduceCompletely rhs' deBruijnize
@@ -1205,28 +1206,29 @@ gmapTEliminator (App (App (Var v) (Type t)) d)
 gmapTEliminator (App (App (Var v) (Type t)) d)
   | nameStableString (varName v) == "$base$Data.Data$gmapQ"
     = do
-          putMsgS "UNFOLDING"
+          -- putMsgS "UNFOLDING"
           let uf = unfoldingTemplate $ realIdUnfolding v
-          prt uf
+          -- prt uf
           d' <- leftInlineLikeCrazy d
-          putMsgS "DICTIONARY"
-          prt d'
-          putMsgS "BETA REDUCING"
+          -- putMsgS "DICTIONARY"
+          -- prt d'
+          -- putMsgS "BETA REDUCING"
           -- let x = betaReduceCompletely' (App (App uf (Type t)) d') deBruijnize
           x <- betaReduceCompletelyM (App (App uf (Type t)) d')
-          prt x
-          putMsgS "CASE OF KNOWN CASE"
+          -- prt x
+          -- putMsgS "CASE OF KNOWN CASE"
           let x' = caseOfKnownCase x
-          prt x'
+          -- prt x'
           -- putMsgS "DROP CASTS"
           let y = x' -- dropCasts x'
-          prt y
+          -- prt y
           let type_specific_gmapT = y
-          putMsgS "ACTUAL GMAPQ"
-          prt type_specific_gmapT
-          putMsgS "UNFOLDING ACTUAL GMAPT"
+          -- putMsgS "ACTUAL GMAPQ"
+          -- prt type_specific_gmapT
+          -- putMsgS "UNFOLDING ACTUAL GMAPT"
           tttt <- leftInlineLikeCrazy type_specific_gmapT
-          prt tttt
+          -- putMsgS "INLINED"
+          -- prt tttt
           return tttt
           -- putMsgS "DROP CASTS"
           -- let tttttt = dropCasts tttt
