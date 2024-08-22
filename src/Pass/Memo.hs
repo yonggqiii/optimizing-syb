@@ -1186,7 +1186,6 @@ optimizeSpecialization gen_traversal_id spec_rhs = do
   rhs' <- fullTransformM gmapTEliminator spec_rhs --transform gmapTDestructurer gmapTTransformer spec_rhs
   -- let rhs = betaReduceCompletely rhs' deBruijnize
   rhs <- betaReduceCompletelyM (letInline rhs')
-  prt rhs
   let specs = getSpecializations gen_traversal_id [] rhs
   -- prt specs
   return (rhs, specs)
