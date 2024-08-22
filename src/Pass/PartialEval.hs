@@ -1,27 +1,9 @@
 module Pass.PartialEval(specByPartialEvaluation) where
 import GHC.Plugins
-    ( CoreToDo(CoreDoPluginPass),
-      ModGuts(mg_binds),
-      falseDataCon,
-      trueDataCon,
-      mkCoreConApps,
-      putMsg,
-      putMsgS,
-      getTyVar_maybe,
-      isTyVarTy,
-      splitTyConApp_maybe,
-      nameStableString,
-      Alt(Alt),
-      Bind(Rec, NonRec),
-      CoreBind,
-      Expr(..),
-      CoreM,
-      CorePluginPass,
-      Type,
-      Var(varName),
-      Outputable(ppr) )
 import Control.Monad ( guard, when )
 import Data.Maybe ( isJust )
+import Utils hiding (prt)
+import Engines.Transform (FullTransform(fullTransformM))
 
 {- The idea behind this pass is to evaluate checks for type-equality 
  - at compile-time. This enables us to eliminate the run-time type 
@@ -50,108 +32,61 @@ import Data.Maybe ( isJust )
 -- | The 'specByPartialEvaluation' pass traverses through the entire program and searches
 -- occurrences of 'sameTypeRep' that can be evaluated at compile time, and replaces 
 -- them with their evaluations.
-specByPartialEvaluation :: CoreToDo
-specByPartialEvaluation = CoreDoPluginPass "Specialization by Partial Evaluation" partialEvalModGuts
+specByPartialEvaluation :: Opts -> CoreToDo
+specByPartialEvaluation opts = CoreDoPluginPass "Specialization by Partial Evaluation" (partialEvalModGuts opts)
+
+prt :: Outputable a => Opts -> a -> CoreM ()
+prt opts = prtIf (show_type_eval opts)
+prtS :: Opts -> String -> CoreM ()
+prtS opts = putMsgSIf (show_type_eval opts)
 
 -- | Performs specialization by partial evaluation on 'ModGuts'
-partialEvalModGuts :: CorePluginPass
-partialEvalModGuts mod_guts = do
-  putMsgS "== Phase: Specialization by Partial Evaluation =="
+partialEvalModGuts :: Opts -> CorePluginPass
+partialEvalModGuts opts mod_guts = do
+  prtS opts $ info "Running type-level partial evaluation phase"
   -- First, get all the CoreBinds in the program
   let all_core_binds :: [CoreBind] = mg_binds mod_guts
-  all_new_core_binds :: [CoreBind] <- mapM partialEvalCoreBind all_core_binds
-  -- For now, map all the core binds with the partialEvalCoreBind function
-  let new_mod_guts   :: ModGuts = mod_guts { mg_binds = all_new_core_binds }
+  all_new_core_binds :: [CoreBind] <- fullTransformM (partialEvalExpr opts) all_core_binds
   -- Once the mod guts have been transformed, return
-  return new_mod_guts
-
--- | Partially evaluate a single 'CoreBind'. 
-partialEvalCoreBind :: CoreBind -- ^ 'CoreBind' which we will partially evaluate
-                    -> CoreM CoreBind -- ^ The resulting 'CoreBind' where partial evaluation has taken place
--- Here we are just destructuring the binds into the var names and the expr.
--- Nothing particularly special happens here. We just want to traverse into the 
--- expressions and find our target
-partialEvalCoreBind (NonRec var expr) = do
-  (v, e) <- partialEvalSingleBind var expr
-  return $ NonRec v e
-partialEvalCoreBind (Rec ls) = do
-  ls' <- mapM (uncurry partialEvalSingleBind) ls
-  return $ Rec ls'
-
--- | Traverse the RHS of the 'CoreBind'
-partialEvalSingleBind :: Var -> Expr Var -> CoreM (Var, Expr Var)
-partialEvalSingleBind var expr = do
-  expr' <- partialEvalExpr expr
-  return (var, expr')
+  return mod_guts { mg_binds = all_new_core_binds }
 
 {- This is the part that actually matters. Here, we are traversing 
  - through an expression in search for the target expression. Once 
  - it is found, we perform partial evaluation based on the rules 
  - presented above. -}
 -- | Partially evaluate an 'Expr'.
-partialEvalExpr :: Expr Var -- ^ The expression to evaluate 
+partialEvalExpr :: Opts
+                -> Expr Var -- ^ The expression to evaluate 
                 -> CoreM (Expr Var) -- ^ The updated expression after partial 
                                     -- evaluation (if it happened)
 {- This is the most interesting case. -}
-partialEvalExpr expr@(App (App (App (App (App (App (Var f) (Type _)) _) (Type t1)) (Type t2)) _) _)
+partialEvalExpr opts expr@(App (App (App (App (App (App (Var f) (Type _)) _) (Type t1)) (Type t2)) _) _)
     | fn_name == target_fn = do
+        prtS opts $ info "Target expression found"
+        prt opts expr
         -- check if type applications are provably equivalent
         if provablyEquivalentTypes t1 t2 then do
-          putMsgS "******* TARGET EXPRESSION FOUND *******"
-          putMsg $ ppr expr
-          putMsgS "REWRITE: type arguments provably equal."
-          putMsgS "New expression:"
+          prtS opts $ info "Type arguments provably equal"
+          prtS opts $ success "New expression"
           -- If type applications are provably equivalent, emit True
           let new_expr = mkCoreConApps trueDataCon []
-          putMsg $ ppr new_expr
+          prt opts new_expr
           return new_expr
         -- check if type applications are provably distinct
         else if provablyDistinctTypes t1 t2 then do
-          putMsgS "******* TARGET EXPRESSION FOUND *******"
-          putMsg $ ppr expr
-          putMsgS "REWRITE: type arguments provably false."
-          putMsgS "New expression:"
+          prtS opts $ info "Type arguments provably equal"
+          prtS opts $ success "New expression"
           -- If type applications are provably distinct, emit False
           let new_expr = mkCoreConApps falseDataCon []
-          putMsg $ ppr new_expr
+          prt opts new_expr
           return new_expr
-        else 
+        else do
+          prtS opts $ info "No rewrite"
           -- Don't rewrite
           return expr
   where fn_name = nameStableString $ varName f
         target_fn = "$base$Data.Typeable.Internal$sameTypeRep"
-        
-
--- In all other cases, traverse the expression looking for the 
--- target expression
-partialEvalExpr e@(Var _) = return e
-partialEvalExpr e@(Lit _) = return e
-partialEvalExpr (App f x) = do
-  f' <- partialEvalExpr f
-  x' <- partialEvalExpr x
-  return $ App f' x'
-partialEvalExpr (Lam var expr) = do
-  e' <- partialEvalExpr expr
-  return $ Lam var e'
-partialEvalExpr (Case expr var ty alts) = do
-  e' <- partialEvalExpr expr
-  alts' <- mapM g alts
-  return $ Case e' var ty alts'
- where g (Alt alt_con names exprb) = do
-        exprb' <- partialEvalExpr exprb
-        return $ Alt alt_con names exprb'
-partialEvalExpr (Let bind expr) = do
-  bind' <- partialEvalCoreBind bind
-  expr' <- partialEvalExpr expr
-  return $ Let bind' expr'
-partialEvalExpr (Cast expr coercion) = do
-  e' <- partialEvalExpr expr
-  return $ Cast e' coercion
-partialEvalExpr (Tick ct e) = do
-  e' <- partialEvalExpr e
-  return $ Tick ct e'
-partialEvalExpr e@(Type _) = return e
-partialEvalExpr e@(Coercion _) = return e
+partialEvalExpr _ e = return e
 
 -- | A function to determine if two types are provably equivalent. 
 provablyEquivalentTypes :: Type -> Type -> Bool
