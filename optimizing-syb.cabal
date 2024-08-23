@@ -73,7 +73,6 @@ library
                   , Engines.InlineUnfolding
                   , Engines.KnownCase
                   , Engines.Substitution
-                  , Engines.DropCasts
                   , Engines.Transform
                   , Engines.LeftElaboration
                   , Utils

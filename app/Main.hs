@@ -1,4 +1,12 @@
 {-# OPTIONS_GHC -O2 -ddump-inlinings -ddump-simpl -ddump-ds -ddump-to-file -fplugin OptimizingSYB #-}
+-- {-# OPTIONS_GHC -O2 #-}
+-- {-# OPTIONS_GHC -fplugin-opt OptimizingSYB:--show-simple #-}
+-- {-# OPTIONS_GHC -fplugin-opt OptimizingSYB:--show-function-map #-}
+-- {-# OPTIONS_GHC -fplugin-opt OptimizingSYB:--show-traversal-extraction #-}
+-- {-# OPTIONS_GHC -fplugin-opt OptimizingSYB:--show-scheme-elim #-}
+-- {-# OPTIONS_GHC -fplugin-opt OptimizingSYB:--show-spec #-}
+-- {-# OPTIONS_GHC -fplugin-opt OptimizingSYB:--show-gmap-elim #-}
+-- {-# OPTIONS_GHC -fplugin-opt OptimizingSYB:--show-type-eval #-}
 {-# LANGUAGE UnicodeSyntax #-}
 module Main where
 
@@ -43,7 +51,7 @@ import Data.Generics
 --   let new_s = s * (1 + k)
 --   putStrLn $ "Increasing salary from " ++ (show s) ++ " to " ++ (show new_s)
 --   return $ S new_s
---
+
 -- increaseM :: Float -> Company -> IO Company
 -- increaseM k = everywhereM $ mkM (incSM k)
 

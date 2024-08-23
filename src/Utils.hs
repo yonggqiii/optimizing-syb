@@ -5,7 +5,7 @@ import Control.Monad
 data Opts = Opts { show_simple :: Bool
                  , show_fn_map :: Bool
                  , show_traversal_extraction :: Bool
-                 , show_go_elim :: Bool
+                 , show_scheme_elim :: Bool
                  , show_gmap_elim :: Bool
                  , show_spec :: Bool
                  , show_type_eval :: Bool
@@ -17,7 +17,7 @@ parseCommandLineOpts []
   = return Opts { show_simple = False
                 , show_fn_map = False
                 , show_traversal_extraction = False
-                , show_go_elim = False
+                , show_scheme_elim = False
                 , show_gmap_elim = False
                 , show_spec = False
                 , show_type_eval = False
@@ -28,14 +28,14 @@ parseCommandLineOpts (x : xs)
           "--show-simple" -> return opts { show_simple = True }
           "--show-function-map" -> return opts { show_fn_map = True }
           "--show-traversal-extraction" -> return opts { show_traversal_extraction = True }
-          "--show-scheme-elim" -> return opts { show_go_elim = True }
+          "--show-scheme-elim" -> return opts { show_scheme_elim = True }
           "--show-gmap-elim" -> return opts { show_gmap_elim = True }
           "--show-spec" -> return opts { show_spec = True }
           "--show-type-eval" -> return opts { show_type_eval = True }
           "--verbose" -> return Opts { show_simple = True
                                       , show_fn_map = True
                                       , show_traversal_extraction = True
-                                      , show_go_elim = True
+                                      , show_scheme_elim = True
                                       , show_gmap_elim = True
                                       , show_spec = True
                                       , show_type_eval = True
