@@ -22,7 +22,6 @@ import GHC.Plugins
       mkSpecForAllTys,
       splitForAllTyVars,
       splitFunTy,
-      splitTyConApp,
       splitTyConApp_maybe,
       splitAppTy_maybe,
       isTyVar,
@@ -30,14 +29,11 @@ import GHC.Plugins
       emptyInScopeSet,
       unitVarEnv,
       panic,
-      ppr,
-      showSDocUnsafe,
       TCvSubst(TCvSubst),
       isCoVarType, mkAppTy,
       )
 import GHC.Core.Coercion (substCo)
 import GHC.Core.Type (substTy)
-import GHC.IO (unsafePerformIO)
 class Substitutable b c where
   substitute :: Var -> b -> c -> c
 
@@ -148,13 +144,12 @@ instance Substitutable Type CoreExpr where
   substitute from to (Coercion c) = Coercion $ substitute from to c
 
 instance Substitutable Type Coercion where
+  substitute :: Var -> Type -> Coercion -> Coercion
   substitute from to coercion = let iss = emptyInScopeSet
                                     tvenv = unitVarEnv from to
                                     tcvenv = emptyCvSubstEnv
                                     substt = TCvSubst iss tvenv tcvenv
-                                    res = substCo substt coercion 
-                                    s = showSDocUnsafe $ ppr res 
-                                in res -- seq (unsafePerformIO (putStrLn s)) res -- substCo substt coercion
+                                in substCo substt coercion
 instance Substitutable Type (Alt Var) where
   substitute :: Var -> Type -> Alt Var -> Alt Var
   substitute from _ _

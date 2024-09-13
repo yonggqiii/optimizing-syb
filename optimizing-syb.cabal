@@ -53,13 +53,13 @@ extra-doc-files:    CHANGELOG.md
 -- extra-source-files:
 
 common warnings
-    ghc-options: -Wall
+    ghc-options: -Wall -O2
 
           
 
 library
     -- Import common warning flags.
-    import:           warnings
+    -- import:           warnings
 
     -- Modules exported by the library.
     exposed-modules:  OptimizingSYB
@@ -89,27 +89,4 @@ library
     -- Base language which the package is written in.
     default-language: GHC2021
 
-executable optimizing-syb
-    -- Import common warning flags.
-    import:           warnings
-
-    -- .hs or .lhs file containing the Main module.
-    main-is:          Main.hs
-
-    -- Modules included in this executable, other than Main.
-    other-modules:    Data.Company
-
-    -- LANGUAGE extensions used by modules in this package.
-    -- other-extensions:
-
-    -- Other library packages from which modules are imported.
-    build-depends:    base ^>=4.17.2.1
-                    , optimizing-syb
-                    -- , /home/yongqi/Repositories/syb/dist-newstyle/build/x86_64-linux/ghc-9.4.8/syb-0.7.2.4
-                    , syb
-
-    -- Directories containing source files.
-    hs-source-dirs:   app
-
-    -- Base language which the package is written in.
-    default-language: GHC2021
+    ghc-options: -Wall

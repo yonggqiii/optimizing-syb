@@ -1367,7 +1367,7 @@ replaceExprWithSpec' :: Id -> [(Type, Id)] -> CoreExpr -> CoreM CoreExpr
 replaceExprWithSpec' lhs specs (App (App (Var i) (Type t)) _)
   | i == lhs && any (\(x, _) -> deBruijnize x == deBruijnize t) specs = do
       -- get the actual spec
-      let Just new_id = lookup (deBruijnize t) (map (\(x, y) -> (deBruijnize x, y)) specs)
+      let new_id = fromJust $ lookup (deBruijnize t) (map (\(x, y) -> (deBruijnize x, y)) specs)
       return $ Var new_id 
 replaceExprWithSpec' _ _ x = return x
 
