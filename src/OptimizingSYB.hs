@@ -15,4 +15,7 @@ plugin = defaultPlugin {
 install :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
 install c todo = do
   opts <- parseCommandLineOpts c
-  return $ [simpleInlinings opts, memoizedSpecialize opts] ++ todo ++ (specByPartialEvaluation opts : todo)
+  return $ [simpleInlinings opts, memoizedSpecialize opts] ++ filter (\x -> case x of 
+    CoreDoSimplify _ _ -> True
+    _ -> False) todo ++ (specByPartialEvaluation opts : todo)
+  
