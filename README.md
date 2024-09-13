@@ -69,6 +69,10 @@
 <!-- ABOUT THE PROJECT -->
 ## About The Project
 
+
+https://github.com/user-attachments/assets/d1dd286b-6265-46f3-b1f1-ec6c9d071de5
+
+
 [![Product Name Screen Shot][product-screenshot]](https://example.com)
 
 Here's a blank template to get started: To avoid retyping too much info. Do a search and replace with your text editor for the following: `yonggqiii`, `optimizing-syb`, `twitter_handle`, `linkedin_username`, `nus.edu.sg`, `yongqi`, `Optimizing SYB`, `Optimizing SYB Traversals via Specialization`
