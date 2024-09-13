@@ -74,7 +74,7 @@ partialEvalExpr opts expr@(App (App (App (App (App (App (Var f) (Type _)) _) (Ty
           return new_expr
         -- check if type applications are provably distinct
         else if provablyDistinctTypes t1 t2 then do
-          prtS opts $ info "Type arguments provably equal"
+          prtS opts $ info "Type arguments provably distinct"
           prtS opts $ success "New expression"
           -- If type applications are provably distinct, emit False
           let new_expr = mkCoreConApps falseDataCon []
