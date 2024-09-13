@@ -1136,7 +1136,7 @@ pushGoReplacementIntoInlinedUnfolding (Lam b e) r = Lam b (pushGoReplacementInto
 pushGoReplacementIntoInlinedUnfolding v _ = v
 
 inlineDictionaries :: SpecializationMap -> CoreProgram -> CoreM SpecializationMap
-inlineDictionaries spec_map pgm = fullTransformM (inlineDictionariesExpr pgm) spec_map
+inlineDictionaries spec_map pgm = fullTransformMTillFixedPoint (map (\(id', ls) -> (id', map (\(t,e) -> (deBruijnize t, deBruijnize e)) ls))) (inlineDictionariesExpr pgm) spec_map
 inlineDictionariesExpr :: CoreProgram -> CoreExpr -> CoreM CoreExpr
 inlineDictionariesExpr pgm (Var v)
   = do let lhss = pgm >>= bindersOf

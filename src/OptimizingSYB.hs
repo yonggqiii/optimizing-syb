@@ -18,4 +18,4 @@ install c todo = do
   return $ [simpleInlinings opts, memoizedSpecialize opts] ++ filter (\x -> case x of 
     CoreDoSimplify _ _ -> True
     _ -> False) todo ++ (specByPartialEvaluation opts : todo)
-  
+
