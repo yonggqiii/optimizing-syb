@@ -1128,8 +1128,9 @@ specTraversals opts (swl : swls) pgm = do
 specTraversal :: Opts -> SpecializationWorklist -> CoreProgram -> CoreM (SpecializationWorklist, CoreProgram)
 specTraversal _ sw@(SWL { swl_worklist = [] }) pgm = return (sw, pgm)
 specTraversal opts sw@(SWL { swl_completed = ls }) pgm
-  | length ls > 30 = do prtSIf (show_spec opts) $ warn $ "Already reached " ++ show (length ls) ++ " specializations for " ++ showSDocUnsafe (ppr (swl_traversal_id sw))
-                        return (sw, pgm)
+  | length ls > 30 = do 
+      prtSIf (show_spec opts) $ warn $ "Already reached " ++ show (length ls) ++ " specializations for " ++ showSDocUnsafe (ppr (swl_traversal_id sw))
+      return (sw, pgm)
 specTraversal opts sw pgm = do
   let SWL { swl_traversal_id = t_id 
           , swl_worklist     = worklist'
@@ -1137,15 +1138,16 @@ specTraversal opts sw pgm = do
       -- earlier case handled the empty worklist
       (type_arg, dict_arg) = head worklist'
       worklist = tail worklist'
-  if isSpecCompleted type_arg completed then
+  putMsgS $ show $ length completed
+  if isSpecCompleted type_arg completed
     -- already specialized, ignore and move to next workitem
-    specTraversal opts (sw { swl_worklist = worklist }) pgm else
+  then  specTraversal opts (sw { swl_worklist = worklist }) pgm
     -- perform the traversal
-    do (specialized_id, specialized_id_rhs, new_work) <- specOneTraversal opts t_id type_arg dict_arg pgm
-       let new_completed = (type_arg, specialized_id) : completed
-       let added_worklist = new_work ++ worklist
-       let new_pgm = NonRec specialized_id specialized_id_rhs : pgm
-       specTraversal opts sw { swl_worklist = added_worklist, swl_completed = new_completed } new_pgm 
+  else  do (specialized_id, specialized_id_rhs, new_work) <- specOneTraversal opts t_id type_arg dict_arg pgm
+           let new_completed = (type_arg, specialized_id) : completed
+           let added_worklist = new_work ++ worklist
+           let new_pgm = NonRec specialized_id specialized_id_rhs : pgm
+           specTraversal opts sw { swl_worklist = added_worklist, swl_completed = new_completed } new_pgm 
 
   -- return (sw, pgm)
 
