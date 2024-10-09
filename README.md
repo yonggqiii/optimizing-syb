@@ -23,7 +23,7 @@
 <h3 align="center">Recover Your Boilerplate (RYB)</h3>
 
   <p align="center">
-    Optimizing SYB Traversals via Specialization
+    Optimizing SYB by Recovering Handwritten Traversals
     <br />
     <br />
     <a href="https://github.com/yonggqiii/optimizing-syb/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
@@ -69,7 +69,7 @@
 
 https://github.com/user-attachments/assets/d1dd286b-6265-46f3-b1f1-ec6c9d071de5
 
-RYB is a GHC plugin for optimizing [Scrap Your Boilerplate (SYB)](https://wiki.haskell.org/Scrap_your_boilerplate)-style traversals via specialization, thereby recovering all handwritten boilerplate code. With this plugin, virtually all runtime/space costs associated with using SYB constructs are eliminated by rebuilding handwritten "boilerplate" traversals from SYB-style traversals.
+Recover Your Boilerplate (RYB) is a GHC plugin for optimizing [Scrap Your Boilerplate (SYB)](https://wiki.haskell.org/Scrap_your_boilerplate)-style traversals via specialization, thereby recovering all handwritten boilerplate code. With this plugin, virtually all runtime/space costs associated with using SYB constructs are eliminated by rebuilding handwritten "boilerplate" traversals from SYB-style traversals.
 
 Currently, this plugin supports optimizations for `mkT`, `mkQ`, `mkM` aliases (along with their `ext` variants), and the traversal schemes `everywhere`, `everywhere'`, `everything` and `everywhereM`. Support for other aliases and schemes are in progress.
 
