@@ -76,6 +76,7 @@ library
                   , Engines.Transform
                   , Engines.LeftElaboration
                   , Pass.Pepsa
+                  , Pass.CastCase
                   , Utils
 
     -- LANGUAGE extensions used by modules in this package.

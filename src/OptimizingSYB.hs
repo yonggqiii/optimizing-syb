@@ -1,8 +1,10 @@
+{-# LANGUAGE LambdaCase #-}
 module OptimizingSYB(plugin) where
 
 import GHC.Plugins
 import Pass.PartialEval(specByPartialEvaluation)
-import Pass.Memo(memoizedSpecialize)
+-- import Pass.Memo(memoizedSpecialize)
+import Pass.CastCase(castCase)
 import Pass.SimpleInlinings(simpleInlinings)
 import Pass.Pepsa(pepsa)
 import Utils (parseCommandLineOpts)
@@ -15,8 +17,9 @@ plugin = defaultPlugin {
 
 install :: [CommandLineOption] -> [CoreToDo] -> CoreM [CoreToDo]
 install c todo = do
-  opts <- parseCommandLineOpts c
-  return $ [simpleInlinings opts, pepsa opts] ++ filter (\x -> case x of 
-    CoreDoSimplify _ _ -> True
-    _ -> False) todo ++ (specByPartialEvaluation opts : todo)
+    opts <- parseCommandLineOpts c
+    return $ [simpleInlinings opts, pepsa opts] ++ simplify ++ (specByPartialEvaluation opts : simplify) ++ (castCase opts : todo)
+  where simplify = filter (\case 
+                          CoreDoSimplify {} -> True
+                          _ -> False) todo
 

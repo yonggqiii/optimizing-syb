@@ -44,7 +44,7 @@ pepsaModGuts opts mod_guts = do
   putMsgS "PEPSA"
   let all_binds    = mg_binds mod_guts
   new_binds <- doThing 100 all_binds []
-  putMsg $ ppr new_binds
+  -- putMsg $ ppr new_binds
   return mod_guts {mg_binds = new_binds}
 
 doThing :: Int -> [CoreBind] -> MemoTable -> CoreM [CoreBind]
@@ -108,7 +108,7 @@ instance RecTargetAcquirable CoreExpr where
   recTargets (Lam b e@(Lam _ _)) (Just x) lbvs targets binds = recTargets e (Just x) (lbvs ++ [b]) targets binds
   recTargets (Lam b e) (Just x) lbvs targets binds = do
     let all_vars = lbvs ++ [b]
-    appViews <- getAppViews e [] targets
+    appViews <- getAppViews e [] targets Nothing
     let appViews' = filterAppViews targets appViews
     let appVars = map appViewToAppVar appViews'
     let new_targets = map (x,) $ filter (/= Empty) $ map (whatever all_vars binds) appVars
@@ -195,7 +195,7 @@ instance Transformable a => Transformable [a] where
     else return (x':xs, memo1, flag)
 
 transformRHS :: AppView -> [CoreBind] -> CoreM (CoreExpr, [CoreExpr])
-transformRHS (f, args) binds = do
+transformRHS (f, args, recover) binds = do
   let inlined = if f `boundIn` binds 
                 then lookupTopLevelRHS f binds
                 else unfoldingTemplate $ realIdUnfolding f
@@ -210,7 +210,7 @@ transformRHS (f, args) binds = do
                     _ -> return memo_args
   -- putMsgS "INLINED"
   -- putMsg $ ppr inlined
-  let applied = foldl App inlined new_args
+  let applied = foldl App (recover inlined) new_args
   beta'd <- betaReduceCompletelyM applied
   rhs <- betaReduceCompletelyM $ letInline $ caseOfKnownCase beta'd
   let original_expr = foldl App (Var f) args
@@ -222,11 +222,11 @@ inlineDict pgm (Var v) = do
   let lhss = pgm >>= bindersOf
   if v `elem` lhss
   then do let rhs = lookupTopLevelRHS v pgm
-              av = getAppView rhs []
+              av = getAppView rhs [] Nothing
           case av of 
-            Just (dfun, _) -> case realIdUnfolding dfun of
-                                DFunUnfolding {} -> return rhs
-                                _ -> return $ Var v
+            Just (dfun, _, _) -> case realIdUnfolding dfun of
+                                      DFunUnfolding {} -> return rhs
+                                      _ -> return $ Var v
             Nothing -> return $ Var v
   else return $ Var v
 -- inlineDict pgm (Var v)
@@ -259,10 +259,10 @@ lookupTopLevelRHS id' pgm
 instance Transformable CoreBind where
   transform (NonRec b e) target binds memo = do
     (e', memo1, flag) <- transform e target binds memo
-    return $ (NonRec b e', memo1, flag)
+    return (NonRec b e', memo1, flag)
   transform (Rec ls) target binds memo = do
     (ls', memo1, flag) <- transform ls target binds memo
-    return $ (Rec ls', memo1, flag)
+    return (Rec ls', memo1, flag)
 
 instance Transformable (Id, CoreExpr) where
   transform (i, e) t b memo = do
@@ -277,9 +277,9 @@ instance Transformable (Alt Var) where
 
 filterAppViews :: Targets -> [AppView] -> [AppView]
 filterAppViews _ [] = []
-filterAppViews t ((f, as):xs) =
+filterAppViews t ((f, as, recover):xs) =
   let relevant_targets = filter (\(f', is) -> (f == f') && (foldr max (-9999) (indicesToList is) < length as)) t
-      mapped_views = map (\(f', is) -> (f', map (as !!) (indicesToList is))) relevant_targets
+      mapped_views = map (\(f', is) -> (f', map (as !!) (indicesToList is), recover)) relevant_targets
   in mapped_views ++ filterAppViews t xs
 
 whatever :: [Var] -> [CoreBind] -> AppVars -> Indices
@@ -348,17 +348,22 @@ instance TargetAcquirable (Id, CoreExpr) where
 instance TargetAcquirable (Alt Var) where
   initialTargets (Alt _ b e) bvs binds = initialTargets e (b ++ bvs) binds
 
-getAppView :: CoreExpr -> [CoreExpr] -> Maybe AppView
-getAppView (Var v) ls = Just (v, ls)
-getAppView (App f x) ls = getAppView f (x : ls)
-getAppView _ _ = Nothing
+getAppView :: CoreExpr -> [CoreExpr] -> Maybe (CoreExpr -> CoreExpr) -> Maybe AppView
+getAppView (Var _) [] _ = Nothing
+getAppView (Var v) ls Nothing = Just (v, ls, id)
+getAppView (Var v) ls (Just f) = Just (v, ls, f)
+getAppView (App f x) ls _ = getAppView f (x : ls) Nothing
+getAppView (Cast _ _) [] _ = Nothing
+getAppView (Cast e c) ls Nothing = getAppView e ls (Just (`Cast` c)) 
+getAppView (Cast e c) ls (Just f) = getAppView e ls (Just (f . (`Cast` c)))
+getAppView _ _ _ = Nothing
 
 getPSA :: CoreExpr -> Targets -> [CoreBind] -> Maybe AppView
 getPSA e t binds = do
-  (f, args) <- getAppView e []
+  (f, args, recover) <- getAppView e [] Nothing
   let filtered_t = filter (\(x, _) -> f == x) t
   psargs <- areArgsTargetsAndPS args binds filtered_t
-  return (f, psargs)
+  return (f, psargs, recover)
 
 areArgsTargetsAndPS :: [CoreExpr] -> [CoreBind] -> Targets -> Maybe [CoreExpr]
 areArgsTargetsAndPS args binds [] = Nothing
@@ -390,33 +395,39 @@ isPSTerm _ _ = True
 
 
 class AppViewObtainable a where
-  getAppViews :: a -> [CoreExpr] -> Targets -> CoreM [AppView]
+  getAppViews :: a -> [CoreExpr] -> Targets -> Maybe (CoreExpr -> CoreExpr) -> CoreM [AppView]
 
 instance AppViewObtainable CoreExpr where
-  getAppViews (Var v) acc targets
+  getAppViews (Var v) acc targets Nothing
     | null acc = return []
-    | v `isIdTarget` targets = return [(v, acc)]
+    | v `isIdTarget` targets = return [(v, acc, id)]
     | otherwise = return []
-  getAppViews (App f x) acc targets = do
-    viewsF <- getAppViews f (x : acc) targets
-    viewsX <- getAppViews x [] targets
+  getAppViews (Var v) acc targets (Just recover)
+    | null acc = return []
+    | v `isIdTarget` targets = return [(v, acc, recover)]
+    | otherwise = return []
+  getAppViews (App f x) acc targets _ = do
+    viewsF <- getAppViews f (x : acc) targets Nothing
+    viewsX <- getAppViews x [] targets Nothing
     return $ viewsF ++ viewsX
-  getAppViews (Lam b e) acc targets = getAppViews e [] targets
-  getAppViews (Let b e) acc targets = do
-    v1 <- getAppViews b [] targets
-    v2 <- getAppViews e [] targets
+  getAppViews (Lam b e) acc targets _ = getAppViews e [] targets Nothing
+  getAppViews (Let b e) acc targets _ = do
+    v1 <- getAppViews b [] targets Nothing
+    v2 <- getAppViews e [] targets Nothing
     return $ v1 ++ v2
-  getAppViews (Case e b t alts) acc targets = do
-    v1 <- getAppViews e [] targets
-    v2 <- getAppViews alts [] targets
+  getAppViews (Case e b t alts) acc targets _ = do
+    v1 <- getAppViews e [] targets Nothing
+    v2 <- getAppViews alts [] targets Nothing
     return $ v1 ++ v2
-  getAppViews (Cast e c) acc targets = getAppViews e [] targets
-  getAppViews (Tick t e) acc targets = getAppViews e [] targets
-  getAppViews _ _ _ = return []
+  getAppViews (Cast e c) [] targets _ = getAppViews e [] targets Nothing
+  getAppViews (Cast e c) acc targets Nothing = getAppViews e acc targets (Just (`Cast` c))
+  getAppViews (Cast e c) acc targets (Just recover) = getAppViews e acc targets (Just (recover . (`Cast` c)))
+  getAppViews (Tick t e) acc targets _ = getAppViews e [] targets Nothing
+  getAppViews _ _ _ _ = return []
 
 instance AppViewObtainable a => AppViewObtainable [a] where
-  getAppViews ls acc targets = do
-    res <- mapM (\x -> getAppViews x acc targets) ls 
+  getAppViews ls acc targets _ = do
+    res <- mapM (\x -> getAppViews x acc targets Nothing) ls 
     return $ concat res
 
 instance AppViewObtainable CoreBind where
@@ -459,25 +470,25 @@ showTargets ((v, t) : xs) = do
   putMsgS $ show $ indicesToList t
   showTargets xs
 
-type AppView = (Id, [CoreExpr])
+type AppView = (Id, [CoreExpr], CoreExpr -> CoreExpr)
 type AppVars = (Id, [Var])
 
 
 appViewToAppVar :: AppView -> AppVars
-appViewToAppVar (f, as) = (f, foldr (\x y -> case x of 
+appViewToAppVar (f, as, _) = (f, foldr (\x y -> case x of 
   Var v -> v : y
   _ -> y) [] as)
 
 isIdTarget :: Id -> Targets -> Bool
 isIdTarget i t = i `elem` map fst t
 
-showAppViews :: [AppView] -> CoreM ()
-showAppViews [] = return ()
-showAppViews ((i, e):xs) = do
-  putMsgS "APPVIEW"
-  putMsg $ ppr i
-  putMsg $ ppr e
-  showAppViews xs
+-- showAppViews :: [AppView] -> CoreM ()
+-- showAppViews [] = return ()
+-- showAppViews ((i, e):xs) = do
+--   putMsgS "APPVIEW"
+--   putMsg $ ppr i
+--   putMsg $ ppr e
+--   showAppViews xs
 
 
 

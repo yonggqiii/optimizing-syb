@@ -48,6 +48,7 @@ partialEvalModGuts opts mod_guts = do
   let all_core_binds :: [CoreBind] = mg_binds mod_guts
   all_new_core_binds :: [CoreBind] <- fullTransformM (partialEvalExpr opts) all_core_binds
   -- Once the mod guts have been transformed, return
+  -- putMsg $ ppr all_new_core_binds
   return mod_guts { mg_binds = all_new_core_binds }
 
 {- This is the part that actually matters. Here, we are traversing 
