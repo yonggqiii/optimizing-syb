@@ -29,11 +29,13 @@ import GHC.Plugins
       emptyInScopeSet,
       unitVarEnv,
       panic,
-      TCvSubst(TCvSubst),
-      isCoVarType, mkAppTy,
+      isCoVarType, mkAppTy, showPprUnsafe, Outputable (ppr), isCoVar,
+      putMsg, putMsgS, coercionKind, coVarKind,
+      Subst(Subst)
       )
 import GHC.Core.Coercion (substCo)
 import GHC.Core.Type (substTy)
+import GHC.Core.TyCo.Subst (emptyIdSubstEnv)
 class Substitutable b c where
   substitute :: Var -> b -> c -> c
 
@@ -73,7 +75,7 @@ instance Substitutable Var Type where
                          rhs' = substitute from to rhs
                      in  mkSpecForAllTys lhs' rhs'
     | isCoercionTy t = panic "Type -> Type substitution has a coercion!?"
-    | isCoVarType t = panic "CoVar"
+    | isCoVarType t = t -- panic $ "CoVar! " ++ (showPprUnsafe $ ppr $ coVarKind t) ++ ", from = " ++ (showPprUnsafe $ ppr from) ++ ", to = " ++ (showPprUnsafe (ppr to))
       -- perform substitution on all type arguments
     | Just (tycon, ty_apps) <- splitTyConApp_maybe t
       = let new_ty_apps = substitute from to ty_apps
@@ -86,7 +88,7 @@ instance Substitutable Var Type where
     --                 in  seq (unsafePerformIO (putStrLn (showSDocUnsafe (ppr t)))) $ mkTyConApp tycon new_ty_apps
 
 getTypeVar :: Type -> TyVar
-getTypeVar = getTyVar "impossible! a definite type variable cant produce its type variable"
+getTypeVar = getTyVar -- "impossible! a definite type variable cant produce its type variable"
 
 instance Substitutable Type Type where
   substitute from to t
@@ -116,7 +118,8 @@ instance Substitutable Type Type where
     | Just (lhs, rhs) <- splitAppTy_maybe t
       = mkAppTy (substitute from to lhs) (substitute from to rhs)
   -- | Substitutes type variables to types in a type
-    | otherwise   = substTy (TCvSubst emptyInScopeSet (unitVarEnv from to) emptyCvSubstEnv) t
+    -- | otherwise   = substTy (TCvSubst emptyInScopeSet (unitVarEnv from to) emptyCvSubstEnv) t
+    | otherwise   = substTy (Subst emptyInScopeSet emptyIdSubstEnv (unitVarEnv from to) emptyCvSubstEnv) t
 
 instance Substitutable Type Var where
   substitute from to v 
@@ -148,7 +151,8 @@ instance Substitutable Type Coercion where
   substitute from to coercion = let iss = emptyInScopeSet
                                     tvenv = unitVarEnv from to
                                     tcvenv = emptyCvSubstEnv
-                                    substt = TCvSubst iss tvenv tcvenv
+                                    -- substt = TCvSubst iss tvenv tcvenv
+                                    substt = Subst iss emptyIdSubstEnv tvenv tcvenv
                                 in substCo substt coercion
 instance Substitutable Type (Alt Var) where
   substitute :: Var -> Type -> Alt Var -> Alt Var
@@ -205,6 +209,8 @@ instance Substitutable Var (Id, CoreExpr) where
 {- The driver behind beta reduction -}
 instance Substitutable CoreExpr CoreExpr where
   -- case of (\@a. ...) @b
+  -- substitute from to e 
+  --   | isCoVar from = panic "wtf???"
   substitute from (Type t) e 
     | not (isTyVar from) = panic "impossible substitution of term-level var with type"
     | otherwise          = substitute from t e

@@ -43,8 +43,10 @@ pepsaModGuts :: Opts -> CorePluginPass
 pepsaModGuts opts mod_guts = do
   putMsgS "PEPSA"
   let all_binds    = mg_binds mod_guts
+  -- putMsg $ ppr all_binds
   new_binds <- doThing 100 all_binds []
-  -- putMsg $ ppr new_binds
+  -- putMsgS "New!!"
+  putMsg $ ppr new_binds
   return mod_guts {mg_binds = new_binds}
 
 doThing :: Int -> [CoreBind] -> MemoTable -> CoreM [CoreBind]
@@ -52,14 +54,12 @@ doThing 0 binds _ = return binds
 doThing n binds memo = do
   i <- initialTargets binds [] binds
   i2 <- recursivelyAcquireTargets i binds
-  -- showTargets i2
+  showTargets i2
   (b', memo1, flag) <- transform binds i2 binds memo
-  -- putMsg $ ppr memo1
   if not flag
   then putMsgS "NOTHING LEFT APPARENTLY" >> return b'
   else do (b''', ls) <- extractLetBinds b'
           let new_pgm = if not (null ls) then Rec ls : b''' else b'''
-          -- putMsg $ ppr new_pgm
           doThing (n - 1) new_pgm memo1
 recursivelyAcquireTargets :: Targets -> [CoreBind] -> CoreM Targets
 recursivelyAcquireTargets targets binds = do
@@ -140,22 +140,16 @@ class Transformable a where
 instance Transformable CoreExpr where
   transform e t binds memo
     | Just av <- getPSA e t binds = do
-        -- putMsgS "FOUND"
-        -- putMsg $ ppr e
         let possible_memoized = getMemoized e memo
         let in_scope_memoized = filter (`boundIn` binds) possible_memoized
         case in_scope_memoized of
-          [] -> do let expr_type = exprType e
+          [] -> do 
+                   let expr_type = exprType e
+                   
                    new_id <- mkSatLHS expr_type
                    (sated_e, memo_e) <- transformRHS av binds
                    return (Let (Rec [(new_id, sated_e)]) (Var new_id), map (, new_id) memo_e ++ memo, True)
-          (x:_) -> do -- putMsgS "MEMO:"
-                      -- putMsg $ ppr x
-                      return (Var x, memo, True) 
-        -- let expr_type = exprType e
-        -- new_id <- mkSatLHS expr_type
-        -- sated_e <- transformRHS av binds
-        -- return (Let (Rec [(new_id, sated_e)]) (Var new_id), memo, True)
+          (x:_) -> return (Var x, memo, True) 
   transform (App f x) t binds memo = do
     (f', memo1, flag) <- transform f t binds memo
     if not flag
@@ -208,8 +202,6 @@ transformRHS (f, args, recover) binds = do
                                        dictArg <- leftInlineLikeCrazy d_arg
                                        return $ take i memo_args ++ (dictArg : drop (i + 1) memo_args)
                     _ -> return memo_args
-  -- putMsgS "INLINED"
-  -- putMsg $ ppr inlined
   let applied = foldl App (recover inlined) new_args
   beta'd <- betaReduceCompletelyM applied
   rhs <- betaReduceCompletelyM $ letInline $ caseOfKnownCase beta'd
@@ -229,11 +221,6 @@ inlineDict pgm (Var v) = do
                                       _ -> return $ Var v
             Nothing -> return $ Var v
   else return $ Var v
--- inlineDict pgm (Var v)
---   = do let lhss = pgm >>= bindersOf
---        if v `elem` lhss
---        then return $ lookupTopLevelRHS v pgm 
---        else return $ Var v
 inlineDict _ e = return e
 
 lookupTopLevelRHS :: Id -> [CoreBind] -> CoreExpr
@@ -296,12 +283,12 @@ class TargetAcquirable a where
   initialTargets :: a -> [Var] -> [CoreBind] -> CoreM Targets
 
 instance TargetAcquirable CoreExpr where
-  initialTargets (Var v) bvs binds = do
+  initialTargets (Var v) _ binds = do
     let t = exprType (Var v)
     let indices = typeHigherRank t
     if indices /= Empty
     then case idDetails v of
-          ClassOpId _ -> return [(v, indices @+ dictArgIndex t)]
+          ClassOpId {} -> return [(v, indices @+ dictArgIndex t)]
           _ -> if v `boundIn` binds 
                then return [(v, indices)]
                else case realIdUnfolding v of
@@ -317,12 +304,12 @@ instance TargetAcquirable CoreExpr where
     t1 <- initialTargets e bvs (b : binds)
     t2 <- initialTargets b bvs (b : binds)
     return $ t1 ++ t2
-  initialTargets (Case e v t alts) bvs binds = do
+  initialTargets (Case e v _ alts) bvs binds = do
     t1 <- initialTargets e bvs binds
     t2 <- initialTargets alts (v : bvs) binds
     return $ t1 ++ t2
-  initialTargets (Cast e c) bvs binds = initialTargets e bvs binds
-  initialTargets (Tick t e) bvs binds = initialTargets e bvs binds
+  initialTargets (Cast e _) bvs binds = initialTargets e bvs binds
+  initialTargets (Tick _ e) bvs binds = initialTargets e bvs binds
   initialTargets _ _ _ = return []
 
 instance TargetAcquirable a => TargetAcquirable [a] where
@@ -346,7 +333,7 @@ instance TargetAcquirable (Id, CoreExpr) where
     return $ t1 ++ t2
 
 instance TargetAcquirable (Alt Var) where
-  initialTargets (Alt _ b e) bvs binds = initialTargets e (b ++ bvs) binds
+  initialTargets (Alt _ b e) bvs = initialTargets e (b ++ bvs)
 
 getAppView :: CoreExpr -> [CoreExpr] -> Maybe (CoreExpr -> CoreExpr) -> Maybe AppView
 getAppView (Var _) [] _ = Nothing
@@ -366,8 +353,8 @@ getPSA e t binds = do
   return (f, psargs, recover)
 
 areArgsTargetsAndPS :: [CoreExpr] -> [CoreBind] -> Targets -> Maybe [CoreExpr]
-areArgsTargetsAndPS args binds [] = Nothing
-areArgsTargetsAndPS args binds ((f, indices):xs) = do
+areArgsTargetsAndPS _ _ [] = Nothing
+areArgsTargetsAndPS args binds ((_, indices):xs) = do
   let is = indicesToList indices
   if foldr max (-9999) is /= length args - 1
   then areArgsTargetsAndPS args binds xs
@@ -385,15 +372,6 @@ isPSTerm binds (Var v) = (v `boundIn` binds) ||
 isPSTerm _ (Type v) = not (isTyVarTy v)
 isPSTerm _ _ = True
 
--- getAppView (App (Var v) e) targets
---   | v `isIdTarget` targets = return $ Just (v, [e])
---   | otherwise = return Nothing
--- getAppView (App f x) targets = do
---   view <- getAppView f targets
---   return $ (\(v, ls) -> (v, ls ++ [x])) <$> view
--- getAppView _ _ = return Nothing
-
-
 class AppViewObtainable a where
   getAppViews :: a -> [CoreExpr] -> Targets -> Maybe (CoreExpr -> CoreExpr) -> CoreM [AppView]
 
@@ -410,19 +388,19 @@ instance AppViewObtainable CoreExpr where
     viewsF <- getAppViews f (x : acc) targets Nothing
     viewsX <- getAppViews x [] targets Nothing
     return $ viewsF ++ viewsX
-  getAppViews (Lam b e) acc targets _ = getAppViews e [] targets Nothing
-  getAppViews (Let b e) acc targets _ = do
+  getAppViews (Lam _ e) _ targets _ = getAppViews e [] targets Nothing
+  getAppViews (Let b e) _ targets _ = do
     v1 <- getAppViews b [] targets Nothing
     v2 <- getAppViews e [] targets Nothing
     return $ v1 ++ v2
-  getAppViews (Case e b t alts) acc targets _ = do
+  getAppViews (Case e _ _ alts) _ targets _ = do
     v1 <- getAppViews e [] targets Nothing
     v2 <- getAppViews alts [] targets Nothing
     return $ v1 ++ v2
-  getAppViews (Cast e c) [] targets _ = getAppViews e [] targets Nothing
+  getAppViews (Cast e _) [] targets _ = getAppViews e [] targets Nothing
   getAppViews (Cast e c) acc targets Nothing = getAppViews e acc targets (Just (`Cast` c))
   getAppViews (Cast e c) acc targets (Just recover) = getAppViews e acc targets (Just (recover . (`Cast` c)))
-  getAppViews (Tick t e) acc targets _ = getAppViews e [] targets Nothing
+  getAppViews (Tick _ e) _ targets _ = getAppViews e [] targets Nothing
   getAppViews _ _ _ _ = return []
 
 instance AppViewObtainable a => AppViewObtainable [a] where
@@ -452,7 +430,7 @@ boundIn v (Rec ls : xs) = v `elem` map fst ls || v `boundIn` xs
 typeHigherRank :: Type -> Indices
 typeHigherRank t
   | Just (v, t') <- splitForAllTyVar_maybe t = appIndices (+1) (typeHigherRank t')
-  | Just (_, a, r) <- splitFunTy_maybe t = 
+  | Just (_, _, a, r) <- splitFunTy_maybe t = 
       case splitForAllTyVar_maybe a of
         Just _ -> Empty @+ 0
         Nothing -> let something = typeHigherRank a
@@ -482,22 +460,13 @@ appViewToAppVar (f, as, _) = (f, foldr (\x y -> case x of
 isIdTarget :: Id -> Targets -> Bool
 isIdTarget i t = i `elem` map fst t
 
--- showAppViews :: [AppView] -> CoreM ()
--- showAppViews [] = return ()
--- showAppViews ((i, e):xs) = do
---   putMsgS "APPVIEW"
---   putMsg $ ppr i
---   putMsg $ ppr e
---   showAppViews xs
-
-
 
 mkSatLHS :: Type -> CoreM Var
 mkSatLHS t = do
   uniq1 <- getUniqueM 
   uniq2 <- getUniqueM
   let name = mkInternalName uniq1 (mkLocalOcc uniq2 (mkVarOcc "sat")) (UnhelpfulSpan UnhelpfulGenerated)
-  return $ mkLocalId name Many t
+  return $ mkLocalId name ManyTy t
 
 leftInlineLikeCrazy :: CoreExpr -> CoreM CoreExpr
 leftInlineLikeCrazy = leftElaborationLikeCrazy extractor inlineId betaReduceCompletely
@@ -508,7 +477,7 @@ leftInlineLikeCrazy = leftElaborationLikeCrazy extractor inlineId betaReduceComp
 type MemoTable = [(CoreExpr, Var)]
 
 getMemoized :: CoreExpr -> MemoTable -> [Var]
-getMemoized e [] = []
+getMemoized _ [] = []
 getMemoized e ((e', v):xs) =
   let xs' = getMemoized e xs
   in  if deBruijnize e == deBruijnize e'
@@ -551,7 +520,7 @@ instance VarOcc Type where
   varOccIn target t
     | Just v <- getTyVar_maybe t = target == v
     | Just (f, x) <- splitAppTy_maybe t = target `varOccIn` f || target `varOccIn` x
-    | Just (_, a, b) <- splitFunTy_maybe t = target `varOccIn` a || target `varOccIn` b
+    | Just (_, _, a, b) <- splitFunTy_maybe t = target `varOccIn` a || target `varOccIn` b
     | Just (_, ls) <- splitTyConApp_maybe t = any (varOccIn target) ls
     | Just (v, t') <- splitForAllTyVar_maybe t = v == target || target `varOccIn` t'
     | otherwise = False
@@ -559,7 +528,7 @@ instance VarOcc Type where
 instance VarOcc Coercion where
   varOccIn target c 
     | Just v <- getCoVar_maybe c = target == v
-    | Just (_, ls) <- splitTyConAppCo_maybe c = any (varOccIn target) ls
+    -- | Just (_, ls) <- splitTyConAppCo_maybe c = any (varOccIn target) ls
     | Just (l, r) <- splitAppCo_maybe c = target `varOccIn` l || target `varOccIn` r
     | Just (l, r) <- splitFunCo_maybe c = target `varOccIn` l || target `varOccIn` r
     | Just (v, l, r) <- splitForAllCo_maybe c = target == v || target `varOccIn` l || target `varOccIn` r

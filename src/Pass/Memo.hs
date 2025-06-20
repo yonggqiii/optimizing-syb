@@ -694,7 +694,7 @@ createTraversalFunctionType target_expr_type bound_vars =
     let (forall_, rhs) = splitForAllTyVars target_expr_type
         (_many, data_arg, a_to_a)      = splitFunTy rhs
         fn_type = aux a_to_a bound_vars
-        with_data = mkVisFunTy Many data_arg fn_type
+        with_data = mkVisFunTy ManyTy data_arg fn_type
         full_type = mkSpecForAllTys forall_ with_data
     in full_type
   where aux :: Type -> [Var] -> Type
@@ -702,7 +702,7 @@ createTraversalFunctionType target_expr_type bound_vars =
         aux acc (v : vs)
           | isTyVar v = let fn_type = mkSpecForAllTy v acc
                         in  aux fn_type vs
-          | otherwise = let fn_type = mkVisFunTy Many (exprType (Var v)) acc
+          | otherwise = let fn_type = mkVisFunTy ManyTy (exprType (Var v)) acc
                         in aux fn_type vs
 
 
@@ -857,7 +857,7 @@ mkTraversalRHSAndTemplate inner_expr bs t = do
     data_arg_name <- do
       uniq <- getUniqueM
       let name = mkInternalName uniq (mkVarOcc "$dData") (UnhelpfulSpan UnhelpfulGenerated)
-      return $ mkLocalVar VanillaId name Many data_arg_type vanillaIdInfo
+      return $ mkLocalVar VanillaId name ManyTy data_arg_type vanillaIdInfo
     -- apply the inner expression with the type and dict variable
     let inner_expr_with_type_and_dict_apps :: Expr Var = App (App inner_expr (Type type_variable)) (Var data_arg_name)
     -- wrap bs around lambdas over the inner expression
@@ -896,7 +896,7 @@ mkTraversalLHS t = do
   uniq1 <- getUniqueM 
   uniq2 <- getUniqueM
   let name = mkInternalName uniq1 (mkLocalOcc uniq2 (mkVarOcc "traversal")) (UnhelpfulSpan UnhelpfulGenerated)
-  return $ mkLocalId name Many t
+  return $ mkLocalId name ManyTy t
 
 createReplacedTraversal :: Id -> Type -> CoreExpr -> BoundVars -> CoreExpr
 createReplacedTraversal traversal_name type_arg dict_arg = aux base_expr
@@ -933,7 +933,8 @@ getOccurringVariables (Case e _ _ alts) bvs = (getOccurringVariables e bvs ++ au
 getOccurringVariables (Cast e _) bvs = getOccurringVariables e bvs
 getOccurringVariables (Tick _ e) bvs = getOccurringVariables e bvs
 getOccurringVariables (Type t) bvs 
-  | isTyVarTy t = filter ( == getTyVar "how can this be!?" t) bvs
+  -- | isTyVarTy t = filter ( == getTyVar "how can this be!?" t) bvs
+  | isTyVarTy t = filter ( == getTyVar t) bvs
   | isForAllTy t = let (_, x) = splitForAllTyVars t
                    in getOccurringVariables (Type x) bvs
   | isFunTy t = let (_, t1, t2) = splitFunTy t
@@ -1052,7 +1053,7 @@ mkGoReplacement traversal_name traversal_structure = do
   new_dict_param <- do
       uniq <- getUniqueM
       let name = mkInternalName uniq (mkVarOcc "$dData") (UnhelpfulSpan UnhelpfulGenerated)
-      let var = mkLocalVar VanillaId name Many dict_param_type vanillaIdInfo
+      let var = mkLocalVar VanillaId name ManyTy dict_param_type vanillaIdInfo
       return $ substitute type_param new_type_param var
   let new_bound_vars = substitute type_param new_type_param $ dropLast 2 bound_vars
   let lambda_body = createReplacedTraversal traversal_name (mkTyVarTy new_type_param) (Var new_dict_param) new_bound_vars
